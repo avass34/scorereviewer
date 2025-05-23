@@ -2,14 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { createClient } from '@sanity/client'
-import { S3Client, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
-import { pdfjs, Document as PDFDocument, Page } from 'react-pdf'
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { Score } from '@/types/score'
-
-// Initialize PDF.js worker
-if (typeof window !== 'undefined') {
-  pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
-}
 
 const client = createClient({
   projectId: process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
@@ -21,7 +15,6 @@ const client = createClient({
 
 const BUCKET_NAME = 'tonebase-general-client'
 const REGION = 'us-east-1'
-const UNREVIEWED_PREFIX = 'editions/unreviewed'
 const APPROVED_PREFIX = 'editions/approved'
 
 const s3Client = new S3Client({
@@ -41,8 +34,25 @@ export default function ReviewPage() {
   const [pageNumber, setPageNumber] = useState(1)
   const [rejectionReason, setRejectionReason] = useState('')
   const [pdfError, setPdfError] = useState<Error | null>(null)
+  const [proxyUrl, setProxyUrl] = useState<string>('')
+  const [scoreWindow, setScoreWindow] = useState<Window | null>(null)
 
   const currentScore = scores[currentScoreIndex]
+
+  // Function to ensure window is open and navigate to URL
+  const openScoreInWindow = (url: string) => {
+    if (scoreWindow && !scoreWindow.closed) {
+      // If we have a window and it's not closed, navigate it
+      scoreWindow.location.href = url
+      scoreWindow.focus()
+    } else {
+      // Create new window
+      const newWindow = window.open(url, 'scoreWindow', 'width=800,height=600')
+      if (newWindow) {
+        setScoreWindow(newWindow)
+      }
+    }
+  }
 
   useEffect(() => {
     fetchScores()
@@ -58,6 +68,10 @@ export default function ReviewPage() {
       console.log('Fetched scores:', result)
       setScores(result)
       setCurrentScoreIndex(0)
+      // Open first score when loaded
+      if (result.length > 0) {
+        openScoreInWindow(result[0].scoreUrl)
+      }
     } catch (err) {
       console.error('Error fetching scores:', err)
       setError('Failed to fetch scores')
@@ -67,16 +81,31 @@ export default function ReviewPage() {
   }
 
   const handlePreviousScore = () => {
-    setCurrentScoreIndex((prev) => Math.max(0, prev - 1))
-    setPageNumber(1) // Reset PDF page when changing scores
-    setRejectionReason('') // Clear rejection reason
+    const newIndex = Math.max(0, currentScoreIndex - 1)
+    setCurrentScoreIndex(newIndex)
+    setRejectionReason('')
+    if (scores[newIndex]) {
+      openScoreInWindow(scores[newIndex].scoreUrl)
+    }
   }
 
   const handleNextScore = () => {
-    setCurrentScoreIndex((prev) => Math.min(scores.length - 1, prev + 1))
-    setPageNumber(1) // Reset PDF page when changing scores
-    setRejectionReason('') // Clear rejection reason
+    const newIndex = Math.min(scores.length - 1, currentScoreIndex + 1)
+    setCurrentScoreIndex(newIndex)
+    setRejectionReason('')
+    if (scores[newIndex]) {
+      openScoreInWindow(scores[newIndex].scoreUrl)
+    }
   }
+
+  // Clean up window on unmount
+  useEffect(() => {
+    return () => {
+      if (scoreWindow) {
+        scoreWindow.close()
+      }
+    }
+  }, [scoreWindow])
 
   const handleApprove = async () => {
     if (!currentScore) return
@@ -84,22 +113,22 @@ export default function ReviewPage() {
     try {
       setLoading(true)
 
-      const oldKey = new URL(currentScore.scoreUrl).pathname.slice(1)
-      const fileName = oldKey.split('/').pop()
+      // Download the PDF through our proxy
+      const response = await fetch(`/api/proxy?url=${encodeURIComponent(currentScore.scoreUrl)}`)
+      if (!response.ok) throw new Error('Failed to download PDF')
+      const pdfBlob = await response.blob()
+
+      // Generate the new key using the slug
+      const fileName = `${currentScore.slug.current}.pdf`
       const newKey = `${APPROVED_PREFIX}/${fileName}`
 
+      // Upload to S3
       await s3Client.send(
-        new CopyObjectCommand({
+        new PutObjectCommand({
           Bucket: BUCKET_NAME,
-          CopySource: `${BUCKET_NAME}/${oldKey}`,
           Key: newKey,
-        })
-      )
-
-      await s3Client.send(
-        new DeleteObjectCommand({
-          Bucket: BUCKET_NAME,
-          Key: oldKey,
+          Body: pdfBlob,
+          ContentType: 'application/pdf',
         })
       )
 
@@ -151,6 +180,13 @@ export default function ReviewPage() {
     }
   }
 
+  useEffect(() => {
+    if (currentScore?.scoreUrl) {
+      // Use the proxy URL for the PDF viewer
+      setProxyUrl(`/api/proxy?url=${encodeURIComponent(currentScore.scoreUrl)}`)
+    }
+  }, [currentScore])
+
   if (loading) {
     return <div className="flex items-center justify-center min-h-screen">Loading...</div>
   }
@@ -164,39 +200,51 @@ export default function ReviewPage() {
   }
 
   return (
-    <div className="container mx-auto p-4">
-      <div className="grid grid-cols-2 gap-4">
-        <div className="border rounded p-4">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-2xl font-bold">Score Details</h2>
-            <div className="flex items-center space-x-2">
+    <div className="container mx-auto p-4 max-w-3xl">
+      <div className="border rounded p-4">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-2xl font-bold">Score Details</h2>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={handlePreviousScore}
+              disabled={currentScoreIndex === 0}
+              className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
+            >
+              ← Previous Score
+            </button>
+            <span className="text-sm text-gray-600">
+              {currentScoreIndex + 1} of {scores.length}
+            </span>
+            <button
+              onClick={handleNextScore}
+              disabled={currentScoreIndex === scores.length - 1}
+              className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
+            >
+              Next Score →
+            </button>
+            {currentScore && (
               <button
-                onClick={handlePreviousScore}
-                disabled={currentScoreIndex === 0}
-                className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
+                onClick={() => openScoreInWindow(currentScore.scoreUrl)}
+                className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 flex items-center space-x-1"
               >
-                ← Previous Score
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" />
+                  <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" />
+                </svg>
+                <span>Reopen Score</span>
               </button>
-              <span className="text-sm text-gray-600">
-                {currentScoreIndex + 1} of {scores.length}
-              </span>
-              <button
-                onClick={handleNextScore}
-                disabled={currentScoreIndex === scores.length - 1}
-                className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
-              >
-                Next Score →
-              </button>
-            </div>
+            )}
           </div>
+        </div>
 
+        <div className="space-y-4">
           <div className="space-y-2">
-            <p><strong>Piece Name:</strong> {currentScore.pieceName}</p>
-            <p><strong>Composer:</strong> {currentScore.composerName}</p>
-            <p><strong>Editor:</strong> {currentScore.editor}</p>
-            <p><strong>Publisher:</strong> {currentScore.publisher}</p>
-            <p><strong>Language:</strong> {currentScore.language}</p>
-            <p><strong>Copyright:</strong> {currentScore.copyright}</p>
+            <p><strong>Piece Name:</strong> {currentScore?.pieceName}</p>
+            <p><strong>Composer:</strong> {currentScore?.composerName}</p>
+            <p><strong>Editor:</strong> {currentScore?.editor}</p>
+            <p><strong>Publisher:</strong> {currentScore?.publisher}</p>
+            <p><strong>Language:</strong> {currentScore?.language}</p>
+            <p><strong>Copyright:</strong> {currentScore?.copyright}</p>
           </div>
 
           <div className="mt-4">
@@ -208,83 +256,22 @@ export default function ReviewPage() {
             />
           </div>
 
-          <div className="flex space-x-4 mt-4">
+          <div className="flex space-x-4 justify-center mt-4">
             <button
               onClick={handleApprove}
-              className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+              className="px-6 py-3 bg-green-500 text-white rounded hover:bg-green-600"
               disabled={loading}
             >
               Approve
             </button>
             <button
               onClick={handleReject}
-              className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+              className="px-6 py-3 bg-red-500 text-white rounded hover:bg-red-600"
               disabled={loading}
             >
               Reject
             </button>
           </div>
-        </div>
-
-        <div className="border rounded p-4">
-          <PDFDocument
-            file={currentScore.scoreUrl}
-            onLoadSuccess={({ numPages }) => {
-              console.log('PDF loaded successfully:', currentScore.scoreUrl)
-              setNumPages(numPages)
-              setPdfError(null)
-            }}
-            onLoadError={(error) => {
-              console.error('Error loading PDF:', error, 'URL:', currentScore.scoreUrl)
-              setPdfError(error)
-            }}
-            loading={
-              <div className="flex items-center justify-center h-[600px]">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
-              </div>
-            }
-            error={
-              <div className="flex items-center justify-center h-[600px] text-red-500">
-                Failed to load PDF. Please check if the URL is accessible.
-              </div>
-            }
-          >
-            <Page 
-              pageNumber={pageNumber} 
-              loading={
-                <div className="flex items-center justify-center h-[600px]">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
-                </div>
-              }
-              error={
-                <div className="flex items-center justify-center h-[600px] text-red-500">
-                  Failed to load page {pageNumber}.
-                </div>
-              }
-            />
-          </PDFDocument>
-          
-          {numPages && !pdfError && (
-            <div className="flex justify-between items-center mt-4">
-              <button
-                onClick={() => setPageNumber(Math.max(1, pageNumber - 1))}
-                disabled={pageNumber <= 1}
-                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span>
-                Page {pageNumber} of {numPages}
-              </span>
-              <button
-                onClick={() => setPageNumber(Math.min(numPages, pageNumber + 1))}
-                disabled={pageNumber >= numPages}
-                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-              >
-                Next
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>
