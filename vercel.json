@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/process-pdf/route.ts": {
+      "memory": 1024,
+      "maxDuration": 300
+    }
+  },
+  "regions": ["iad1"]
+} 
