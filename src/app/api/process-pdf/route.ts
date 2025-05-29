@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { chromium } from 'playwright-core'
+import { ImageResponse } from '@vercel/og'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 
 const BUCKET_NAME = 'tonebase-emails'
@@ -18,8 +18,6 @@ export const runtime = 'edge'
 export const preferredRegion = 'iad1' // Use US East region for better IMSLP access
 
 export async function POST(request: NextRequest) {
-  let browser = null
-  
   try {
     const { scoreUrl, slug } = await request.json()
 
@@ -31,24 +29,20 @@ export async function POST(request: NextRequest) {
 
     console.log('Processing score:', { scoreUrl, slug })
 
-    // Launch browser
-    browser = await chromium.launch()
-    console.log('Browser launched')
-
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    })
-    const page = await context.newPage()
-
-    // Navigate to score URL with timeout and wait for network idle
-    console.log('Navigating to score URL:', scoreUrl)
-    await page.goto(scoreUrl, { 
-      waitUntil: 'networkidle',
-      timeout: 60000 // 60 second timeout
+    // Fetch the PDF URL directly first
+    const response = await fetch(scoreUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
     })
 
-    // Look for PDF links
-    const pdfUrl = await page.evaluate(() => {
+    let pdfUrl = scoreUrl
+    const contentType = response.headers.get('content-type')
+
+    // If the response is HTML, we need to parse it for the PDF URL
+    if (contentType && contentType.includes('text/html')) {
+      const html = await response.text()
+      
       const patterns = [
         /href="(https:\/\/[^"]+\.pdf[^"]*)"/, // Standard href pattern
         /data-id="(https:\/\/[^"]+\.pdf[^"]*)"/, // Data-id pattern
@@ -56,15 +50,14 @@ export async function POST(request: NextRequest) {
         /window\.location\.href\s*=\s*["'](https:\/\/[^"']+\.pdf[^"']*)["']/ // JavaScript redirect pattern
       ]
       
-      const content = document.documentElement.innerHTML
       for (const pattern of patterns) {
-        const match = content.match(pattern)
+        const match = html.match(pattern)
         if (match && match[1]) {
-          return match[1]
+          pdfUrl = match[1]
+          break
         }
       }
-      return null
-    })
+    }
 
     if (!pdfUrl) {
       throw new Error('Could not find PDF URL')
@@ -72,13 +65,19 @@ export async function POST(request: NextRequest) {
 
     console.log('Found PDF URL:', pdfUrl)
 
-    // Download PDF
-    const pdfResponse = await page.goto(pdfUrl)
-    if (!pdfResponse) {
+    // Download the PDF
+    const pdfResponse = await fetch(pdfUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    })
+
+    if (!pdfResponse.ok || !pdfResponse.body) {
       throw new Error('Failed to download PDF')
     }
 
-    const pdfBuffer = await pdfResponse.body()
+    // Convert the response to a buffer
+    const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer())
     console.log('Downloaded PDF, size:', pdfBuffer.byteLength)
 
     // Generate S3 key
@@ -89,7 +88,7 @@ export async function POST(request: NextRequest) {
       key: newKey
     })
 
-    // Upload to S3
+    // Upload to S3 with timeout
     console.log('Starting S3 upload...')
     const uploadCommand = new PutObjectCommand({
       Bucket: BUCKET_NAME,
@@ -98,7 +97,13 @@ export async function POST(request: NextRequest) {
       ContentType: 'application/pdf',
     })
 
-    await s3Client.send(uploadCommand)
+    // Set a timeout for S3 upload
+    const uploadPromise = s3Client.send(uploadCommand)
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('S3 upload timeout')), 20000)
+    )
+
+    await Promise.race([uploadPromise, timeoutPromise])
     console.log('S3 upload successful')
 
     const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
@@ -109,14 +114,18 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('PDF processing error:', error)
+    
+    // Provide more detailed error information
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    const errorDetails = {
+      message: errorMessage,
+      type: error instanceof Error ? error.constructor.name : typeof error,
+      stack: error instanceof Error ? error.stack : undefined
+    }
+    
     return NextResponse.json({ 
       error: 'Failed to process PDF',
-      details: error instanceof Error ? error.message : 'Unknown error'
+      details: errorDetails
     }, { status: 500 })
-  } finally {
-    if (browser) {
-      await browser.close()
-      console.log('Browser closed')
-    }
   }
 } 
