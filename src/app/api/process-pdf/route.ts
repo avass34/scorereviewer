@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
-import chromium from '@sparticuz/chromium'
+import chromium from '@sparticuz/chromium-min'
 import puppeteer from 'puppeteer-core'
 
 const BUCKET_NAME = 'tonebase-emails'
@@ -45,10 +45,11 @@ export async function POST(request: NextRequest) {
     // Launch browser with Sparticuz Chromium
     logWithTimestamp('Launching browser with Sparticuz Chromium')
     browser = await puppeteer.launch({
-      args: chromium.args,
+      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+      headless: "new",
+      ignoreHTTPSErrors: true
     })
     logWithTimestamp('Browser launched successfully')
 
@@ -128,7 +129,8 @@ export async function POST(request: NextRequest) {
       // Handle IMSLP download page
       logWithTimestamp('Handling IMSLP download page')
       
-      // Check for and click "I understand" button if present
+      // I understand, continue
+      // Click here to continue your download.
       try {
         logWithTimestamp('Looking for "I understand" button')
         const understandButton = await page.waitForSelector('button:has-text("I understand")', { timeout: 5000 })

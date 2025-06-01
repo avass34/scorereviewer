@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   transpilePackages: ['react-is', '@sanity/ui', 'sanity'],
+  serverExternalPackages: ['puppeteer-core', '@sparticuz/chromium-min'],
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
@@ -11,4 +12,4 @@ const nextConfig: NextConfig = {
   }
 };
 
-export default nextConfig;
+export default nextConfig; 
