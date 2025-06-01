@@ -18,7 +18,7 @@
     "@sanity/client": "^7.2.1",
     "@sanity/image-url": "^1.1.0",
     "@sanity/vision": "^3.88.3",
-    "@sparticuz/chromium-min": "^133.0.0",
+    "@sparticuz/chromium-min": "^119.0.2",
     "@vercel/og": "^0.6.8",
     "googleapis": "^149.0.0",
     "next": "15.3.2",

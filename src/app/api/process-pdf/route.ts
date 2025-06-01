@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
       args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: "new",
+      headless: true,
       ignoreHTTPSErrors: true
     })
     logWithTimestamp('Browser launched successfully')
