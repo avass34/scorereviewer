@@ -7,6 +7,11 @@ const BUCKET_NAME = 'tonebase-emails'
 const REGION = 'us-east-1'
 const APPROVED_PREFIX = 'Q2_2021/Q2W4/Scores/general'
 
+interface ProcessPdfResponse {
+  success: boolean;
+  url: string;
+}
+
 // Helper function for consistent logging
 function logWithTimestamp(message: string, data?: any) {
   const timestamp = new Date().toISOString()
@@ -24,9 +29,6 @@ const s3Client = new S3Client({
   },
 })
 
-export const runtime = 'edge'
-export const preferredRegion = 'iad1' // Use US East region for better IMSLP access
-
 export async function POST(request: NextRequest) {
   const startTime = Date.now()
   let browser;
@@ -42,23 +44,30 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
-    // Launch browser with Sparticuz Chromium
-    logWithTimestamp('Launching browser with Sparticuz Chromium')
-    browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
+    // Initialize Chrome binary
+    logWithTimestamp('Initializing Chrome binary')
+    await chromium.executablePath
+
+    // Launch browser with appropriate configuration
+    logWithTimestamp('Launching browser')
+    const isVercel = process.env.VERCEL === '1'
+    
+    const launchOptions = {
+      args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: true,
+      headless: isVercel ? true : false,
       ignoreHTTPSErrors: true
-    })
+    }
+
+    logWithTimestamp('Browser launch options:', launchOptions)
+    browser = await puppeteer.launch(launchOptions)
     logWithTimestamp('Browser launched successfully')
 
     try {
-      // Create new page and handle navigation
       const page = await browser.newPage()
       logWithTimestamp('New browser page created')
       
-      // Set viewport and user agent
       await page.setViewport({ width: 1280, height: 800 })
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
       logWithTimestamp('Page configuration set', { viewport: '1280x800' })
@@ -129,8 +138,6 @@ export async function POST(request: NextRequest) {
       // Handle IMSLP download page
       logWithTimestamp('Handling IMSLP download page')
       
-      // I understand, continue
-      // Click here to continue your download.
       try {
         logWithTimestamp('Looking for "I understand" button')
         const understandButton = await page.waitForSelector('button:has-text("I understand")', { timeout: 5000 })
@@ -186,7 +193,7 @@ export async function POST(request: NextRequest) {
         throw new Error('Could not find download link after waiting')
       }
 
-      // Get the href attribute using evaluate with proper type assertion
+      // Get the href attribute
       const pdfUrl = await downloadLink.evaluate((el: Element) => {
         const anchor = el as HTMLAnchorElement
         return anchor.href
@@ -240,7 +247,6 @@ export async function POST(request: NextRequest) {
       })
 
     } finally {
-      // Always close the browser
       if (browser) {
         logWithTimestamp('Closing browser')
         await browser.close()
