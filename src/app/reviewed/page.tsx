@@ -94,8 +94,8 @@ export default function ReviewedScoresPage() {
       }
 
       // Update Google Sheets based on status change
-      if (score.status === 'approved' && newStatus !== 'approved') {
-        // Remove from sheet if changing from approved to something else
+      if (score.status === 'approved') {
+        // Always remove from sheet if the score was previously approved
         await fetch('/api/sheets', {
           method: 'POST',
           headers: {
@@ -106,7 +106,9 @@ export default function ReviewedScoresPage() {
             score,
           }),
         })
-      } else if (newStatus === 'approved') {
+      }
+      
+      if (newStatus === 'approved') {
         // Add to sheet if changing to approved
         await fetch('/api/sheets', {
           method: 'POST',
