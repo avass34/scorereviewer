@@ -2,18 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@sanity/client'
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { Score } from '@/types/score'
 import Link from 'next/link'
 import debounce from 'lodash/debounce'
-
-// Define error types
-interface S3Error extends Error {
-  code?: string;
-  $metadata?: {
-    requestId?: string;
-  };
-}
 
 const client = createClient({
   projectId: process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
@@ -22,18 +13,7 @@ const client = createClient({
   apiVersion: '2024-02-20',
 })
 
-const BUCKET_NAME = 'tonebase-emails'
-const REGION = 'us-east-1'
-const APPROVED_PREFIX = 'Q2_2021/Q2W4/Scores/general'
 const SCORES_PER_PAGE = 10
-
-const s3Client = new S3Client({
-  region: REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-  },
-})
 
 export default function ReviewPage() {
   const [scores, setScores] = useState<Score[]>([])
@@ -47,10 +27,7 @@ export default function ReviewPage() {
   const [currentPage, setCurrentPage] = useState(0)
   const [totalScores, setTotalScores] = useState(0)
   const [rejectionReason, setRejectionReason] = useState('')
-  const [pdfError, setPdfError] = useState<Error | null>(null)
-  const [proxyUrl, setProxyUrl] = useState<string>('')
   const [scoreWindow, setScoreWindow] = useState<Window | null>(null)
-  const [currentPdfUrl, setCurrentPdfUrl] = useState<string | null>(null)
   const searchRef = useRef<HTMLDivElement>(null)
 
   const currentScore = scores[currentScoreIndex]
@@ -138,14 +115,17 @@ export default function ReviewPage() {
       if (event.data?.type === 'SCORE_URL_UPDATE') {
         const newUrl = event.data.url
         console.log('Processing URL update:', {
-          previous: currentPdfUrl,
+          previous: currentScore?.scoreUrl,
           new: newUrl,
-          isChange: currentPdfUrl !== newUrl
+          isChange: currentScore?.scoreUrl !== newUrl
         })
         
-        if (newUrl !== currentPdfUrl) {
+        if (newUrl !== currentScore?.scoreUrl) {
           console.log('Updating current PDF URL to:', newUrl)
-          setCurrentPdfUrl(newUrl)
+          setCurrentScoreIndex(0)
+          setScores((prev) => prev.map((score) =>
+            score._id === currentScore?._id ? { ...score, scoreUrl: newUrl } : score
+          ))
         }
       }
     }
@@ -156,7 +136,7 @@ export default function ReviewPage() {
       console.log('Cleaning up message listener')
       window.removeEventListener('message', handleMessage)
     }
-  }, [currentPdfUrl])
+  }, [currentScore])
 
   const fetchScores = async (page: number) => {
     try {
@@ -277,13 +257,6 @@ export default function ReviewPage() {
   }, [scoreWindow])
 
   const handleApprove = async () => {
-    console.log('Approve clicked. Current state:', {
-      hasCurrentScore: !!currentScore,
-      currentPdfUrl,
-      scoreWindowExists: !!scoreWindow,
-      scoreWindowClosed: scoreWindow?.closed
-    })
-
     if (!currentScore) return
 
     // Immediately update UI and move to next score
@@ -291,48 +264,12 @@ export default function ReviewPage() {
     setScores((prev) => prev.filter((_, i) => i !== currentScoreIndex))
     setCurrentScoreIndex((prev) => Math.min(prev, scores.length - 2))
 
-    let newScoreUrl = scoreToProcess.scoreUrl // Default to original URL
-    let updateError = null
-
     try {
       console.log('Starting approval process for:', {
         pieceName: scoreToProcess.pieceName,
         composerName: scoreToProcess.composerName,
         originalUrl: scoreToProcess.scoreUrl
       })
-
-      // Process PDF using the new endpoint
-      try {
-        console.log('Sending score for PDF processing...')
-        const processPdfResponse = await fetch('/api/process-pdf', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            scoreUrl: scoreToProcess.scoreUrl,
-            slug: scoreToProcess.slug.current,
-          }),
-        })
-
-        if (!processPdfResponse.ok) {
-          const errorData = await processPdfResponse.json()
-          console.error('PDF processing failed:', {
-            status: processPdfResponse.status,
-            statusText: processPdfResponse.statusText,
-            error: errorData
-          })
-          throw new Error(`Failed to process PDF: ${errorData.error}${errorData.details ? ` - ${errorData.details}` : ''}`)
-        }
-
-        const { url: processedUrl } = await processPdfResponse.json()
-        console.log('PDF processed successfully:', processedUrl)
-        newScoreUrl = processedUrl
-      } catch (processError) {
-        console.error('PDF processing failed:', processError)
-        console.warn('Continuing with original URL:', scoreToProcess.scoreUrl)
-        // Continue with original URL
-      }
 
       // Update Sanity database
       console.log('Updating score status in database...')
@@ -344,17 +281,45 @@ export default function ReviewPage() {
         body: JSON.stringify({
           scoreId: scoreToProcess._id,
           status: 'approved',
-          scoreUrl: newScoreUrl,
+          scoreUrl: scoreToProcess.scoreUrl,
           reviewedAt: new Date().toISOString(),
         }),
       })
 
       if (!updateResponse.ok) {
         const errorData = await updateResponse.json()
-        updateError = `Failed to update score status: ${errorData.error || updateResponse.statusText}`
-        throw new Error(updateError)
+        throw new Error(`Failed to update score status: ${errorData.error || updateResponse.statusText}`)
       }
 
+      // Add to Google Sheets
+      console.log('Adding score to Google Sheets...')
+      const sheetsResponse = await fetch('/api/sheets', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'add',
+          score: {
+            ...scoreToProcess,
+            status: 'approved',
+          },
+        }),
+      })
+
+      if (!sheetsResponse.ok) {
+        const errorData = await sheetsResponse.json()
+        console.error('Failed to add to Google Sheets:', {
+          status: sheetsResponse.status,
+          statusText: sheetsResponse.statusText,
+          error: errorData
+        })
+        console.warn('Score approved but failed to add to Google Sheets')
+      } else {
+        console.log('Successfully added to Google Sheets')
+      }
+
+      console.log('Score successfully approved and updated')
     } catch (error) {
       const err = error as Error
       console.error('Failed to process approval:', {
@@ -371,47 +336,6 @@ export default function ReviewPage() {
         return newScores
       })
     }
-
-    // Always try to update Google Sheets, regardless of previous operations
-    try {
-      console.log('Adding score to Google Sheets...')
-      const sheetsResponse = await fetch('/api/sheets', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'add',
-          score: {
-            ...scoreToProcess,
-            status: 'approved',
-            scoreUrl: newScoreUrl,
-          },
-        }),
-      })
-
-      if (!sheetsResponse.ok) {
-        const errorData = await sheetsResponse.json()
-        console.error('Failed to add to Google Sheets:', {
-          status: sheetsResponse.status,
-          statusText: sheetsResponse.statusText,
-          error: errorData
-        })
-        console.warn('Score approved but failed to add to Google Sheets')
-      } else {
-        console.log('Successfully added to Google Sheets')
-      }
-    } catch (sheetsError) {
-      console.error('Error updating Google Sheets:', sheetsError)
-      console.warn('Score approved but failed to add to Google Sheets')
-    }
-
-    // If there was an error in the main approval process, throw it now
-    if (updateError) {
-      throw new Error(updateError)
-    }
-
-    console.log('Score successfully approved and updated')
   }
 
   const handleReject = async () => {
@@ -447,13 +371,6 @@ export default function ReviewPage() {
       // Optionally show a toast or notification about the background error
     }
   }
-
-  useEffect(() => {
-    if (currentScore?.scoreUrl) {
-      // Use the proxy URL for the PDF viewer
-      setProxyUrl(`/api/proxy?url=${encodeURIComponent(currentScore.scoreUrl)}`)
-    }
-  }, [currentScore])
 
   if (loading) {
     return <div className="flex items-center justify-center min-h-screen">Loading...</div>
