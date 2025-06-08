@@ -345,8 +345,14 @@ export default function ReviewPage() {
     const scoreToProcess = currentScore
     const reasonToProcess = rejectionReason
     setScores((prev) => prev.filter((_, i) => i !== currentScoreIndex))
-    setCurrentScoreIndex((prev) => Math.min(prev, scores.length - 2))
+    const newIndex = Math.min(currentScoreIndex, scores.length - 2)
+    setCurrentScoreIndex(newIndex)
     setRejectionReason('')
+
+    // Open the next score in the proxy window
+    if (scores[newIndex + 1]) {
+      openScoreInWindow(scores[newIndex + 1].scoreUrl)
+    }
 
     try {
       // Process rejection in the background
