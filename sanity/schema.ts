@@ -64,6 +64,12 @@ const score = defineType({
       validation: Rule => Rule.required(),
     }),
     defineField({
+      name: 'summary',
+      title: 'Summary',
+      type: 'text',
+      description: 'AI-generated summary of the piece',
+    }),
+    defineField({
       name: 'status',
       title: 'Status',
       type: 'string',

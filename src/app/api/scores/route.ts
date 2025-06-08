@@ -12,16 +12,32 @@ const client = createClient({
 export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json()
-    const { scoreId, status, rejectionReason, scoreUrl, reviewedAt } = body
+    const { scoreId, status, rejectionReason, scoreUrl, reviewedAt, summary } = body
+
+    console.log('Updating score:', {
+      scoreId,
+      status,
+      hasRejectionReason: !!rejectionReason,
+      hasScoreUrl: !!scoreUrl,
+      hasReviewedAt: !!reviewedAt,
+      hasSummary: !!summary
+    })
 
     const patch = client.patch(scoreId).set({
-      status,
-      reviewedAt: reviewedAt || new Date().toISOString(),
+      ...(status && { status }),
+      ...(reviewedAt && { reviewedAt }),
       ...(rejectionReason && { rejectionReason }),
-      ...(scoreUrl && { scoreUrl })
+      ...(scoreUrl && { scoreUrl }),
+      ...(summary && { summary })
     })
 
     const updatedScore = await patch.commit()
+    console.log('Score updated successfully:', {
+      id: updatedScore._id,
+      status: updatedScore.status,
+      summary: updatedScore.summary?.substring(0, 50) + '...'
+    })
+    
     return NextResponse.json(updatedScore)
   } catch (error) {
     console.error('Error updating score:', error)

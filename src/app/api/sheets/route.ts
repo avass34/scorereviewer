@@ -2,6 +2,45 @@ import { google } from 'googleapis'
 import { NextRequest, NextResponse } from 'next/server'
 import { JWT } from 'google-auth-library'
 
+// Queue system for processing approvals
+class ApprovalQueue {
+  private queue: Array<() => Promise<void>> = []
+  private processing = false
+
+  async add(task: () => Promise<void>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          await task()
+          resolve()
+        } catch (error) {
+          reject(error)
+        }
+      })
+      this.processQueue()
+    })
+  }
+
+  private async processQueue() {
+    if (this.processing || this.queue.length === 0) return
+    
+    this.processing = true
+    try {
+      const task = this.queue.shift()
+      if (task) {
+        await task()
+      }
+    } finally {
+      this.processing = false
+      if (this.queue.length > 0) {
+        await this.processQueue()
+      }
+    }
+  }
+}
+
+const approvalQueue = new ApprovalQueue()
+
 // Define error type for Google API errors
 interface GoogleAPIError extends Error {
   response?: {
@@ -137,14 +176,32 @@ async function ensureSheetExists(sheetName: string, headers: string[]) {
 
 async function findPieceBySlug(slug: string): Promise<number | null> {
   try {
+    console.log('Looking for piece with slug:', slug)
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${PIECES_SHEET}'!A2:D`,
+      range: `'${PIECES_SHEET}'!A:E`,
     })
 
-    const rows = response.data.values || []
-    const rowIndex = rows.findIndex(row => row[0] === slug)
-    return rowIndex !== -1 ? rowIndex + 2 : null // +2 because of 1-based index and header row
+    if (!response.data.values) {
+      console.log('No values found in sheet')
+      return null
+    }
+
+    // Get all rows including header
+    const allRows = response.data.values
+    console.log('Total rows in sheet:', allRows.length)
+
+    // Find the row with exact slug match (case sensitive)
+    for (let i = 1; i < allRows.length; i++) {
+      const row = allRows[i]
+      if (row && row[0] === slug) {
+        console.log('Found existing piece at row:', i + 1, 'Row data:', row)
+        return i + 1 // Return 1-based row number
+      }
+    }
+
+    console.log('No existing piece found for slug:', slug)
+    return null
   } catch (error) {
     console.error('Error finding piece by slug:', error)
     throw error
@@ -155,34 +212,114 @@ async function addPieceIfNotExists(score: any): Promise<string> {
   const slug = createSlug(score.composerName, score.pieceName)
   
   try {
-    // Check if piece already exists
-    const existingRowIndex = await findPieceBySlug(slug)
-    if (existingRowIndex !== null) {
-      console.log('Piece already exists with slug:', slug)
-      return slug
+    // First check if piece exists - do this in a loop to handle race conditions
+    let retries = 0
+    const maxRetries = 3
+    let existingRowIndex: number | null = null
+
+    while (retries < maxRetries) {
+      existingRowIndex = await findPieceBySlug(slug)
+      
+      if (existingRowIndex !== null) {
+        console.log('Piece already exists with slug:', slug, 'at row:', existingRowIndex)
+        return slug
+      }
+
+      // If we get here, the piece doesn't exist. Let's try to add it.
+      try {
+        // Only generate summary for new pieces
+        let summary = score.summary || ''
+        if (!summary) {
+          try {
+            console.log('Attempting to generate summary for new piece:', {
+              pieceName: score.pieceName,
+              composerName: score.composerName
+            })
+            
+            const baseUrl = process.env.VERCEL_URL 
+              ? `https://${process.env.VERCEL_URL}` 
+              : process.env.NODE_ENV === 'development'
+                ? 'http://localhost:3000'
+                : ''
+            
+            const summaryResponse = await fetch(`${baseUrl}/api/generate-summary`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                pieceName: score.pieceName,
+                composerName: score.composerName,
+              }),
+            })
+
+            if (summaryResponse.ok) {
+              const data = await summaryResponse.json()
+              summary = data.summary
+              console.log('Generated summary for new piece:', summary)
+              
+              // Update Sanity with the summary
+              await fetch('/api/scores', {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  scoreId: score._id,
+                  summary: summary,
+                }),
+              })
+            } else {
+              console.error('Failed to generate summary:', await summaryResponse.text())
+            }
+          } catch (error) {
+            console.error('Error generating summary for new piece:', error)
+          }
+        }
+
+        // Check one more time before adding to handle race conditions
+        const finalCheck = await findPieceBySlug(slug)
+        if (finalCheck !== null) {
+          console.log('Piece was added by another process, using existing piece')
+          return slug
+        }
+
+        // Add new piece with generated or existing summary
+        const pieceRow = [
+          slug,               // Slug
+          score.pieceName,    // Piece Name
+          score.composerName, // Composer
+          score.language,     // Language
+          summary,           // Summary
+        ]
+
+        console.log('Adding new piece row:', pieceRow)
+
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `'${PIECES_SHEET}'!A:E`,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [pieceRow],
+          },
+        })
+
+        console.log('Successfully added new piece')
+        return slug
+      } catch (error) {
+        console.error(`Error adding piece (attempt ${retries + 1}):`, error)
+        retries++
+        if (retries === maxRetries) {
+          throw error
+        }
+        // Wait a short time before retrying
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
     }
 
-    // Add new piece
-    const pieceRow = [
-      slug,               // Slug
-      score.pieceName,    // Piece Name
-      score.composerName, // Composer
-      score.language,     // Language
-    ]
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `'${PIECES_SHEET}'!A:D`,
-      valueInputOption: 'RAW',
-      requestBody: {
-        values: [pieceRow],
-      },
-    })
-
-    console.log('Added new piece with slug:', slug)
-    return slug
+    throw new Error('Failed to add piece after maximum retries')
   } catch (error) {
-    console.error('Error adding piece:', error)
+    console.error('Error in addPieceIfNotExists:', error)
     throw error
   }
 }
@@ -193,6 +330,7 @@ async function addEditionToSheet(score: any, pieceSlug: string) {
       pieceSlug,
       editor: score.editor,
       publisher: score.publisher,
+      scoreUrl: score.scoreUrl
     })
 
     const editionRow = [
@@ -213,7 +351,7 @@ async function addEditionToSheet(score: any, pieceSlug: string) {
       },
     })
 
-    console.log('Edition added successfully')
+    console.log('Successfully added edition')
   } catch (error) {
     console.error('Error adding edition:', error)
     throw error
@@ -272,6 +410,76 @@ async function removeEditionFromSheet(score: any) {
   }
 }
 
+async function cleanupDuplicatePieces() {
+  try {
+    console.log('Starting duplicate piece cleanup')
+    
+    // Get all pieces
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${PIECES_SHEET}'!A:E`,
+    })
+
+    if (!response.data.values) {
+      console.log('No values found in sheet')
+      return
+    }
+
+    const allRows = response.data.values
+    const header = allRows[0]
+    const rows = allRows.slice(1)
+
+    // Track unique slugs and their first occurrence
+    const slugMap = new Map<string, number>()
+    const duplicateRows: number[] = []
+
+    rows.forEach((row, index) => {
+      const slug = row[0] as string
+      if (!slugMap.has(slug)) {
+        slugMap.set(slug, index + 2) // +2 for 1-based index and header
+      } else {
+        duplicateRows.push(index + 2)
+      }
+    })
+
+    if (duplicateRows.length === 0) {
+      console.log('No duplicate pieces found')
+      return
+    }
+
+    console.log('Found duplicate rows:', duplicateRows)
+
+    // Get sheet ID for deletion
+    const sheetId = await getSheetId(PIECES_SHEET)
+
+    // Delete duplicate rows in reverse order to maintain correct indices
+    const sortedDuplicates = duplicateRows.sort((a, b) => b - a)
+    
+    for (const rowIndex of sortedDuplicates) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        requestBody: {
+          requests: [{
+            deleteDimension: {
+              range: {
+                sheetId,
+                dimension: 'ROWS',
+                startIndex: rowIndex - 1, // Convert to 0-based index
+                endIndex: rowIndex // endIndex is exclusive
+              }
+            }
+          }]
+        }
+      })
+      console.log('Deleted duplicate row:', rowIndex)
+    }
+
+    console.log('Cleanup completed, removed', duplicateRows.length, 'duplicate pieces')
+  } catch (error) {
+    console.error('Error during duplicate cleanup:', error)
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
@@ -287,20 +495,27 @@ export async function POST(request: NextRequest) {
     })
 
     // Ensure both sheets exist with correct headers
-    await ensureSheetExists(PIECES_SHEET, ['Slug', 'Piece Name', 'Composer', 'Language'])
+    await ensureSheetExists(PIECES_SHEET, ['Slug', 'Piece Name', 'Composer', 'Language', 'Summary'])
     await ensureSheetExists(APPROVED_EDITIONS_SHEET, ['Piece Slug', 'Editor', 'Publisher', 'Copyright', 'Score URL', 'Approval Date'])
 
-    switch (action) {
-      case 'add':
+    // Process actions through the queue
+    if (action === 'add') {
+      // Return immediately but queue the actual processing
+      const processPromise = approvalQueue.add(async () => {
+        await cleanupDuplicatePieces()
         const pieceSlug = await addPieceIfNotExists(score)
         await addEditionToSheet(score, pieceSlug)
-        break
-      case 'remove':
+      })
+
+      // Wait for queue processing to complete before sending response
+      await processPromise
+    } else if (action === 'remove') {
+      await approvalQueue.add(async () => {
         await removeEditionFromSheet(score)
-        break
-      default:
-        console.error('Invalid action:', action)
-        return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+      })
+    } else {
+      console.error('Invalid action:', action)
+      return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
     }
 
     console.log('Operation completed successfully')

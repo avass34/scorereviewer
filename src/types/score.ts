@@ -18,4 +18,5 @@ export interface Score extends SanityDocument {
   status: ScoreStatus
   rejectionReason?: string
   reviewedAt?: string
+  summary?: string
 } 
