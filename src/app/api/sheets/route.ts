@@ -11,6 +11,23 @@ interface GoogleAPIError {
   message: string;
 }
 
+// Validate environment variables
+const requiredEnvVars = {
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  GOOGLE_PRIVATE_KEY: process.env.GOOGLE_PRIVATE_KEY,
+  GOOGLE_SHEET_ID: process.env.GOOGLE_SHEET_ID
+}
+
+// Check for missing environment variables
+const missingEnvVars = Object.entries(requiredEnvVars)
+  .filter(([_, value]) => !value)
+  .map(([key]) => key)
+
+if (missingEnvVars.length > 0) {
+  console.error('Missing required environment variables:', missingEnvVars)
+  throw new Error(`Missing required environment variables: ${missingEnvVars.join(', ')}`)
+}
+
 // Initialize Google Sheets client
 const auth = new google.auth.GoogleAuth({
   credentials: {
@@ -237,11 +254,14 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { action, score } = body
 
-    console.log('Received request:', { action, score: { 
-      pieceName: score.pieceName,
-      composerName: score.composerName,
-      status: score.status,
-    }})
+    console.log('Received request:', { 
+      action, 
+      score: { 
+        pieceName: score.pieceName,
+        composerName: score.composerName,
+        status: score.status,
+      }
+    })
 
     switch (action) {
       case 'add':
@@ -259,17 +279,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error('Sheets API error:', error)
-    const apiError = error as GoogleAPIError
-    if (apiError.response) {
-      console.error('Error response:', {
-        status: apiError.response.status,
-        statusText: apiError.response.statusText,
-        data: apiError.response.data,
-      })
-    }
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return NextResponse.json({ 
       error: 'Failed to update sheet',
-      details: apiError.message
+      details: errorMessage
     }, { status: 500 })
   }
 } 

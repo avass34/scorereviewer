@@ -46,195 +46,103 @@ export async function POST(request: NextRequest) {
 
     // Initialize Chrome binary
     logWithTimestamp('Initializing Chrome binary')
-    await chromium.executablePath
+    const executablePath = await chromium.executablePath()
 
     // Launch browser with appropriate configuration
     logWithTimestamp('Launching browser')
     const isVercel = process.env.VERCEL === '1'
     
     const launchOptions = {
-      args: chromium.args,
+      args: [
+        ...chromium.args,
+        '--autoplay-policy=user-gesture-required',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-update',
+        '--disable-default-apps',
+        '--disable-dev-shm-usage',
+        '--disable-domain-reliability',
+        '--disable-extensions',
+        '--disable-features=AudioServiceOutOfProcess',
+        '--disable-hang-monitor',
+        '--disable-ipc-flooding-protection',
+        '--disable-notifications',
+        '--disable-offer-store-unmasked-wallet-cards',
+        '--disable-popup-blocking',
+        '--disable-print-preview',
+        '--disable-prompt-on-repost',
+        '--disable-renderer-backgrounding',
+        '--disable-setuid-sandbox',
+        '--disable-speech-api',
+        '--disable-sync',
+        '--hide-scrollbars',
+        '--ignore-gpu-blacklist',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--no-first-run',
+        '--no-pings',
+        '--no-sandbox',
+        '--no-zygote',
+        '--password-store=basic',
+        '--use-gl=swiftshader',
+        '--use-mock-keychain',
+      ],
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: isVercel ? true : false,
-      ignoreHTTPSErrors: true
+      executablePath,
+      headless: true,
+      ignoreHTTPSErrors: true,
+      cacheDirectory: '/tmp'
     }
 
     logWithTimestamp('Browser launch options:', launchOptions)
     browser = await puppeteer.launch(launchOptions)
     logWithTimestamp('Browser launched successfully')
 
-    try {
-      const page = await browser.newPage()
-      logWithTimestamp('New browser page created')
+    const page = await browser.newPage()
+    logWithTimestamp('New browser page created')
+    
+    await page.setViewport({ width: 1280, height: 800 })
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    logWithTimestamp('Page configuration set', { viewport: '1280x800' })
+
+    // Navigate to IMSLP page
+    logWithTimestamp('Navigating to IMSLP page', { url: scoreUrl })
+    const response = await page.goto(scoreUrl, { 
+      waitUntil: 'networkidle0',
+      timeout: 30000 
+    })
+
+    if (!response) {
+      logWithTimestamp('Failed to get response from IMSLP page')
+      throw new Error('Failed to get response from IMSLP page')
+    }
+
+    // Check if we got a PDF directly
+    const contentType = response.headers()['content-type'] || ''
+    logWithTimestamp('Response content type', { contentType })
+
+    if (contentType.includes('application/pdf')) {
+      logWithTimestamp('Direct PDF response received')
+      const pdfBuffer = await response.buffer()
+      logWithTimestamp('PDF downloaded directly', { size: pdfBuffer.byteLength })
       
-      await page.setViewport({ width: 1280, height: 800 })
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-      logWithTimestamp('Page configuration set', { viewport: '1280x800' })
-
-      // Enable request/response logging
-      page.on('request', request => {
-        logWithTimestamp('Page request', {
-          url: request.url(),
-          method: request.method(),
-          resourceType: request.resourceType()
-        })
-      })
-
-      page.on('response', response => {
-        logWithTimestamp('Page response', {
-          url: response.url(),
-          status: response.status(),
-          headers: response.headers()
-        })
-      })
-
-      // Navigate to IMSLP page
-      logWithTimestamp('Navigating to IMSLP page', { url: scoreUrl })
-      const response = await page.goto(scoreUrl, { 
-        waitUntil: 'networkidle0',
-        timeout: 30000 
-      })
-
-      if (!response) {
-        logWithTimestamp('Failed to get response from IMSLP page')
-        throw new Error('Failed to get response from IMSLP page')
-      }
-
-      // Check if we got a PDF directly
-      const contentType = response.headers()['content-type'] || ''
-      logWithTimestamp('Response content type', { contentType })
-
-      if (contentType.includes('application/pdf')) {
-        logWithTimestamp('Direct PDF response received')
-        const pdfBuffer = await response.buffer()
-        logWithTimestamp('PDF downloaded directly', { size: pdfBuffer.byteLength })
-        
-        // Upload to S3
-        const fileName = `${slug}.pdf`
-        const newKey = `${APPROVED_PREFIX}/${fileName}`
-        logWithTimestamp('Uploading PDF to S3', { bucket: BUCKET_NAME, key: newKey })
-        
-        await s3Client.send(new PutObjectCommand({
-          Bucket: BUCKET_NAME,
-          Key: newKey,
-          Body: pdfBuffer,
-          ContentType: 'application/pdf',
-        }))
-        logWithTimestamp('S3 upload successful')
-        
-        const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
-        logWithTimestamp('Processing completed successfully', { 
-          duration: Date.now() - startTime,
-          newUrl 
-        })
-
-        return NextResponse.json({ 
-          success: true,
-          url: newUrl
-        })
-      }
-
-      // Handle IMSLP download page
-      logWithTimestamp('Handling IMSLP download page')
-      
-      try {
-        logWithTimestamp('Looking for "I understand" button')
-        const understandButton = await page.waitForSelector('button:has-text("I understand")', { timeout: 5000 })
-        if (understandButton) {
-          logWithTimestamp('"I understand" button found, clicking')
-          await understandButton.click()
-          await page.waitForTimeout(1000)
-          logWithTimestamp('"I understand" button clicked')
-        }
-      } catch (e) {
-        logWithTimestamp('No immediate "I understand" button found')
-      }
-
-      // Function to check for download link
-      const checkForDownloadLink = async () => {
-        const downloadSelectors = [
-          'a[href*=".pdf"]:not([style*="display: none"])',
-          'a:has-text("Click here")',
-          'a:has-text("Download")',
-          'a[href*="download"]'
-        ]
-        
-        for (const selector of downloadSelectors) {
-          logWithTimestamp('Checking selector', { selector })
-          const element = await page.$(selector)
-          if (element) {
-            const isVisible = await element.isVisible()
-            if (isVisible) {
-              logWithTimestamp('Found visible download link', { selector })
-              return element
-            }
-          }
-        }
-        return null
-      }
-
-      // Wait for download link with periodic checks
-      logWithTimestamp('Starting periodic checks for download link')
-      let downloadLink = null
-      const maxAttempts = 20
-      for (let i = 0; i < maxAttempts; i++) {
-        logWithTimestamp('Download link check attempt', { attempt: i + 1, maxAttempts })
-        downloadLink = await checkForDownloadLink()
-        if (downloadLink) {
-          logWithTimestamp('Download link found', { attempt: i + 1 })
-          break
-        }
-        await page.waitForTimeout(1000)
-      }
-
-      if (!downloadLink) {
-        logWithTimestamp('Failed to find download link after all attempts')
-        throw new Error('Could not find download link after waiting')
-      }
-
-      // Get the href attribute
-      const pdfUrl = await downloadLink.evaluate((el: Element) => {
-        const anchor = el as HTMLAnchorElement
-        return anchor.href
-      })
-      logWithTimestamp('Extracted PDF URL', { pdfUrl })
-
-      // Navigate to PDF URL
-      logWithTimestamp('Downloading PDF', { url: pdfUrl })
-      const pdfResponse = await page.goto(pdfUrl, { 
-        waitUntil: 'networkidle0',
-        timeout: 30000 
-      })
-      
-      if (!pdfResponse) {
-        logWithTimestamp('Failed to download PDF')
-        throw new Error('Failed to download PDF')
-      }
-
-      const pdfBuffer = await pdfResponse.buffer()
-      logWithTimestamp('PDF downloaded', { size: pdfBuffer.byteLength })
-
-      // Generate S3 key and upload
+      // Upload to S3
       const fileName = `${slug}.pdf`
       const newKey = `${APPROVED_PREFIX}/${fileName}`
-      logWithTimestamp('Generated S3 path', {
-        bucket: BUCKET_NAME,
-        key: newKey
-      })
-
-      // Upload to S3
-      logWithTimestamp('Starting S3 upload')
-      const uploadCommand = new PutObjectCommand({
+      logWithTimestamp('Uploading PDF to S3', { bucket: BUCKET_NAME, key: newKey })
+      
+      await s3Client.send(new PutObjectCommand({
         Bucket: BUCKET_NAME,
         Key: newKey,
         Body: pdfBuffer,
         ContentType: 'application/pdf',
-      })
-
-      await s3Client.send(uploadCommand)
+      }))
       logWithTimestamp('S3 upload successful')
-
+      
       const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
       logWithTimestamp('Processing completed successfully', { 
         duration: Date.now() - startTime,
@@ -245,14 +153,83 @@ export async function POST(request: NextRequest) {
         success: true,
         url: newUrl
       })
-
-    } finally {
-      if (browser) {
-        logWithTimestamp('Closing browser')
-        await browser.close()
-        logWithTimestamp('Browser closed')
-      }
     }
+
+    // Handle IMSLP download page
+    logWithTimestamp('Handling IMSLP download page')
+    
+    try {
+      logWithTimestamp('Looking for "I understand" button')
+      const understandButton = await page.waitForSelector('button:has-text("I understand")', { timeout: 5000 })
+      if (understandButton) {
+        logWithTimestamp('"I understand" button found, clicking')
+        await understandButton.click()
+        await page.waitForTimeout(1000)
+        logWithTimestamp('"I understand" button clicked')
+      }
+    } catch (e) {
+      logWithTimestamp('No immediate "I understand" button found')
+    }
+
+    // Look for the download link
+    logWithTimestamp('Looking for download link')
+    const downloadLink = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a'))
+      return links.find(link => 
+        link.href?.includes('.pdf') || 
+        link.getAttribute('data-id')?.includes('.pdf')
+      )?.href
+    })
+
+    if (!downloadLink) {
+      logWithTimestamp('No download link found')
+      throw new Error('No download link found')
+    }
+
+    logWithTimestamp('Found download link', { url: downloadLink })
+
+    // Download the PDF
+    logWithTimestamp('Downloading PDF')
+    const pdfResponse = await page.goto(downloadLink, { waitUntil: 'networkidle0' })
+
+    if (!pdfResponse) {
+      logWithTimestamp('Failed to download PDF')
+      throw new Error('Failed to download PDF')
+    }
+
+    const pdfBuffer = await pdfResponse.buffer()
+    logWithTimestamp('PDF downloaded', { size: pdfBuffer.byteLength })
+
+    // Generate S3 key and upload
+    const fileName = `${slug}.pdf`
+    const newKey = `${APPROVED_PREFIX}/${fileName}`
+    logWithTimestamp('Generated S3 path', {
+      bucket: BUCKET_NAME,
+      key: newKey
+    })
+
+    // Upload to S3
+    logWithTimestamp('Starting S3 upload')
+    const uploadCommand = new PutObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: newKey,
+      Body: pdfBuffer,
+      ContentType: 'application/pdf',
+    })
+
+    await s3Client.send(uploadCommand)
+    logWithTimestamp('S3 upload successful')
+
+    const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
+    logWithTimestamp('Processing completed successfully', { 
+      duration: Date.now() - startTime,
+      newUrl 
+    })
+
+    return NextResponse.json({ 
+      success: true,
+      url: newUrl
+    })
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -269,5 +246,11 @@ export async function POST(request: NextRequest) {
       error: 'Failed to process PDF',
       details: errorDetails
     }, { status: 500 })
+  } finally {
+    if (browser) {
+      logWithTimestamp('Closing browser')
+      await browser.close()
+      logWithTimestamp('Browser closed')
+    }
   }
 } 
