@@ -1,14 +1,14 @@
 import { google } from 'googleapis'
 import { NextRequest, NextResponse } from 'next/server'
+import { JWT } from 'google-auth-library'
 
 // Define error type for Google API errors
-interface GoogleAPIError {
+interface GoogleAPIError extends Error {
   response?: {
     status: number;
     statusText: string;
     data: any;
   };
-  message: string;
 }
 
 // Validate environment variables
@@ -29,11 +29,9 @@ if (missingEnvVars.length > 0) {
 }
 
 // Initialize Google Sheets client
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  },
+const auth = new JWT({
+  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 })
 
@@ -41,18 +39,28 @@ console.log('Sheets API initialized with email:', process.env.GOOGLE_SERVICE_ACC
 
 const sheets = google.sheets({ version: 'v4', auth })
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID
-const SHEET_NAME = 'Approved Editions'
+const APPROVED_EDITIONS_SHEET = 'Approved Editions'
+const PIECES_SHEET = 'Pieces'
 
 console.log('Using spreadsheet ID:', SPREADSHEET_ID)
 
 // Cache for sheet ID
 let sheetId: number | null = null
 
-async function getSheetId() {
+// Helper function to create a slug from composer name and piece name
+function createSlug(composerName: string, pieceName: string): string {
+  return `${composerName}-${pieceName}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-') // Replace non-alphanumeric chars with hyphens
+    .replace(/^-+|-+$/g, '') // Remove leading/trailing hyphens
+}
+
+// Helper function to get sheet ID
+async function getSheetId(sheetName: string): Promise<number> {
   if (sheetId !== null) return sheetId
 
   try {
-    console.log('Fetching sheet ID for:', SHEET_NAME)
+    console.log(`Fetching sheet ID for: "${sheetName}"`)
     const response = await sheets.spreadsheets.get({
       spreadsheetId: SPREADSHEET_ID,
     })
@@ -63,163 +71,186 @@ async function getSheetId() {
     })
 
     const sheet = response.data.sheets?.find(
-      (s) => s.properties?.title === SHEET_NAME
+      (s) => s.properties?.title === sheetName
     )
 
     if (!sheet?.properties?.sheetId) {
-      console.error('Sheet not found in spreadsheet')
-      throw new Error('Sheet not found')
+      console.error(`Sheet "${sheetName}" not found`)
+      throw new Error(`Sheet "${sheetName}" not found`)
     }
 
     sheetId = sheet.properties.sheetId
-    console.log('Found sheet ID:', sheetId)
+    console.log(`Found sheet ID: ${sheetId}`)
     return sheetId
   } catch (error) {
-    console.error('Error getting sheet ID:', error)
+    console.error(`Error getting sheet ID for "${sheetName}":`, error)
     throw error
   }
 }
 
-async function addRowToSheet(score: any) {
+async function ensureSheetExists(sheetName: string, headers: string[]) {
   try {
-    console.log('Adding row for score:', {
-      pieceName: score.pieceName,
-      composerName: score.composerName,
-      status: score.status,
+    console.log(`Checking if sheet "${sheetName}" exists...`)
+    const headerResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetName}'!A1:${String.fromCharCode(65 + headers.length - 1)}1`,
+    })
+    
+    if (headerResponse.data.values) {
+      console.log(`Sheet "${sheetName}" exists, headers:`, headerResponse.data.values[0])
+      return
+    }
+  } catch (error) {
+    console.log(`Sheet "${sheetName}" does not exist, will create it`)
+  }
+
+  try {
+    console.log(`Creating new sheet "${sheetName}"...`)
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: sheetName,
+            },
+          },
+        }],
+      },
     })
 
-    // Format the row data
-    const row = [
-      score.pieceName,        // Piece Name
-      score.composerName,     // Composer
-      score.editor,           // Editor
-      score.publisher,        // Publisher
-      score.language,         // Language
-      score.copyright,        // Copyright
-      score.scoreUrl,         // Score URL
+    console.log(`Adding headers to "${sheetName}":`, headers)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetName}'!A1:${String.fromCharCode(65 + headers.length - 1)}1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [headers],
+      },
+    })
+    console.log('Headers added successfully')
+  } catch (error) {
+    console.error(`Error creating sheet "${sheetName}":`, error)
+    throw error
+  }
+}
+
+async function findPieceBySlug(slug: string): Promise<number | null> {
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${PIECES_SHEET}'!A2:D`,
+    })
+
+    const rows = response.data.values || []
+    const rowIndex = rows.findIndex(row => row[0] === slug)
+    return rowIndex !== -1 ? rowIndex + 2 : null // +2 because of 1-based index and header row
+  } catch (error) {
+    console.error('Error finding piece by slug:', error)
+    throw error
+  }
+}
+
+async function addPieceIfNotExists(score: any): Promise<string> {
+  const slug = createSlug(score.composerName, score.pieceName)
+  
+  try {
+    // Check if piece already exists
+    const existingRowIndex = await findPieceBySlug(slug)
+    if (existingRowIndex !== null) {
+      console.log('Piece already exists with slug:', slug)
+      return slug
+    }
+
+    // Add new piece
+    const pieceRow = [
+      slug,               // Slug
+      score.pieceName,    // Piece Name
+      score.composerName, // Composer
+      score.language,     // Language
+    ]
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${PIECES_SHEET}'!A:D`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [pieceRow],
+      },
+    })
+
+    console.log('Added new piece with slug:', slug)
+    return slug
+  } catch (error) {
+    console.error('Error adding piece:', error)
+    throw error
+  }
+}
+
+async function addEditionToSheet(score: any, pieceSlug: string) {
+  try {
+    console.log('Adding edition for piece:', {
+      pieceSlug,
+      editor: score.editor,
+      publisher: score.publisher,
+    })
+
+    const editionRow = [
+      pieceSlug,           // Piece Slug
+      score.editor,        // Editor
+      score.publisher,     // Publisher
+      score.copyright,     // Copyright
+      score.scoreUrl,      // Score URL
       new Date().toISOString(), // Approval Date
     ]
 
-    console.log('Formatted row data:', row)
-
-    // First ensure the sheet exists and headers are set
-    let sheetExists = false
-    try {
-      console.log('Checking if sheet exists...')
-      const headerResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `'${SHEET_NAME}'!A1:H1`,
-      })
-      sheetExists = true
-      console.log('Sheet exists, headers:', headerResponse.data.values?.[0])
-    } catch (error) {
-      console.log('Sheet does not exist, will create it')
-    }
-
-    if (!sheetExists) {
-      try {
-        console.log('Creating new sheet...')
-        const createResponse = await sheets.spreadsheets.batchUpdate({
-          spreadsheetId: SPREADSHEET_ID,
-          requestBody: {
-            requests: [
-              {
-                addSheet: {
-                  properties: {
-                    title: SHEET_NAME,
-                  },
-                },
-              },
-            ],
-          },
-        })
-        console.log('Sheet created:', createResponse.data)
-
-        const headers = [
-          'Piece Name',
-          'Composer',
-          'Editor',
-          'Publisher',
-          'Language',
-          'Copyright',
-          'Score URL',
-          'Approval Date'
-        ]
-
-        console.log('Adding headers:', headers)
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
-          range: `'${SHEET_NAME}'!A1:H1`,
-          valueInputOption: 'RAW',
-          requestBody: {
-            values: [headers],
-          },
-        })
-        console.log('Headers added successfully')
-      } catch (createError) {
-        console.error('Error creating sheet:', createError)
-        throw createError
-      }
-    }
-
-    console.log('Appending row to sheet...')
-    // Append the row
-    const appendResponse = await sheets.spreadsheets.values.append({
+    await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!A:H`,
+      range: `'${APPROVED_EDITIONS_SHEET}'!A:F`,
       valueInputOption: 'RAW',
       requestBody: {
-        values: [row],
+        values: [editionRow],
       },
     })
-    console.log('Row appended successfully:', appendResponse.data)
+
+    console.log('Edition added successfully')
   } catch (error) {
-    console.error('Error adding row to sheet:', error)
-    const apiError = error as GoogleAPIError
-    if (apiError.response) {
-      console.error('Error response:', {
-        status: apiError.response.status,
-        statusText: apiError.response.statusText,
-        data: apiError.response.data,
-      })
-    }
+    console.error('Error adding edition:', error)
     throw error
   }
 }
 
-async function removeRowFromSheet(score: any) {
+async function removeEditionFromSheet(score: any) {
   try {
-    console.log('Removing row for score:', {
-      pieceName: score.pieceName,
-      composerName: score.composerName,
+    const pieceSlug = createSlug(score.composerName, score.pieceName)
+    console.log('Removing edition for piece:', {
+      pieceSlug,
       scoreUrl: score.scoreUrl,
     })
 
-    // Get all values from the sheet
-    console.log('Fetching current sheet values...')
+    // Get all values from the editions sheet
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${SHEET_NAME}'!A:H`,
+      range: `'${APPROVED_EDITIONS_SHEET}'!A:F`,
     })
 
     const values = response.data.values || []
-    console.log('Found', values.length, 'rows in sheet')
+    console.log('Found', values.length, 'rows in editions sheet')
     
-    // Find the row index that matches the score URL
-    const rowIndex = values.findIndex(row => row[6] === score.scoreUrl)
-    console.log('Found matching row at index:', rowIndex)
+    // Find the row index that matches both the piece slug and score URL
+    const rowIndex = values.findIndex(row => row[0] === pieceSlug && row[4] === score.scoreUrl)
+    console.log('Found matching edition at index:', rowIndex)
     
     if (rowIndex === -1) {
-      console.log('No matching row found, skipping deletion')
+      console.log('No matching edition found, skipping deletion')
       return
     }
 
-    const sheetId = await getSheetId()
-    console.log('Retrieved sheet ID:', sheetId)
+    const sheetId = await getSheetId(APPROVED_EDITIONS_SHEET)
+    console.log('Retrieved editions sheet ID:', sheetId)
 
-    console.log('Deleting row...')
     // Delete the row
-    const deleteResponse = await sheets.spreadsheets.batchUpdate({
+    await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
       requestBody: {
         requests: [{
@@ -234,17 +265,9 @@ async function removeRowFromSheet(score: any) {
         }],
       },
     })
-    console.log('Row deleted successfully:', deleteResponse.data)
+    console.log('Edition removed successfully')
   } catch (error) {
-    console.error('Error removing row from sheet:', error)
-    const apiError = error as GoogleAPIError
-    if (apiError.response) {
-      console.error('Error response:', {
-        status: apiError.response.status,
-        statusText: apiError.response.statusText,
-        data: apiError.response.data,
-      })
-    }
+    console.error('Error removing edition:', error)
     throw error
   }
 }
@@ -263,12 +286,17 @@ export async function POST(request: NextRequest) {
       }
     })
 
+    // Ensure both sheets exist with correct headers
+    await ensureSheetExists(PIECES_SHEET, ['Slug', 'Piece Name', 'Composer', 'Language'])
+    await ensureSheetExists(APPROVED_EDITIONS_SHEET, ['Piece Slug', 'Editor', 'Publisher', 'Copyright', 'Score URL', 'Approval Date'])
+
     switch (action) {
       case 'add':
-        await addRowToSheet(score)
+        const pieceSlug = await addPieceIfNotExists(score)
+        await addEditionToSheet(score, pieceSlug)
         break
       case 'remove':
-        await removeRowFromSheet(score)
+        await removeEditionFromSheet(score)
         break
       default:
         console.error('Invalid action:', action)
