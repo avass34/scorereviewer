@@ -184,6 +184,8 @@ async function validateBrowserlessConnection(wsEndpoint: string) {
         throw new Error('Browserless.io quota exceeded or payment required')
       } else if (statusResponse.status === 401) {
         throw new Error('Invalid Browserless.io API key')
+      } else if (statusResponse.status === 403) {
+        throw new Error('Access forbidden - your API key may be restricted or your IP might be blocked')
       } else {
         throw new Error(`Browserless.io service error: ${statusResponse.status} ${statusResponse.statusText}`)
       }
@@ -201,7 +203,8 @@ async function validateBrowserlessConnection(wsEndpoint: string) {
     const err = error as Error
     logWithTimestamp('Browserless.io validation failed', {
       error: err.message,
-      stack: err.stack
+      stack: err.stack,
+      apiKeyFirstChars: process.env.BROWSERLESS_API_KEY?.substring(0, 4) + '...'
     })
     throw error
   }
@@ -252,7 +255,8 @@ async function getBrowser() {
     }
     
     try {
-      const wsEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}&--proxy-server=http://brd.superproxy.io:22225`
+      // Simple WebSocket endpoint without proxy
+      const wsEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`
       
       // Validate connection before attempting to connect
       await validateBrowserlessConnection(wsEndpoint)
@@ -283,7 +287,8 @@ async function getBrowser() {
         message: err.message,
         stack: err.stack,
         apiKey: process.env.BROWSERLESS_API_KEY ? 'present' : 'missing',
-        apiKeyLength: process.env.BROWSERLESS_API_KEY?.length
+        apiKeyLength: process.env.BROWSERLESS_API_KEY?.length,
+        apiKeyFirstChars: process.env.BROWSERLESS_API_KEY?.substring(0, 4) + '...'
       })
       
       // Provide more specific error messages
@@ -291,6 +296,8 @@ async function getBrowser() {
         throw new Error('Invalid Browserless.io API key - please check your environment variables')
       } else if (err.message.includes('402')) {
         throw new Error('Browserless.io quota exceeded - please check your usage limits')
+      } else if (err.message.includes('403')) {
+        throw new Error('Access forbidden - please check your Browserless.io account permissions and IP restrictions')
       } else if (err.message.includes('WebSocket')) {
         throw new Error('Failed to establish WebSocket connection with Browserless.io - check your network and firewall settings')
       }
