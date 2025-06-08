@@ -168,13 +168,55 @@ const s3Client = new S3Client({
   },
 })
 
+// Helper function to validate Browserless.io connection
+async function validateBrowserlessConnection(wsEndpoint: string) {
+  try {
+    logWithTimestamp('Validating Browserless.io connection', { 
+      wsEndpoint: wsEndpoint.replace(/token=([^&]+)/, 'token=****') // Hide API key in logs
+    })
+
+    // Try a basic HTTP request to check API key
+    const statusUrl = `https://chrome.browserless.io/json/version?token=${process.env.BROWSERLESS_API_KEY}`
+    const statusResponse = await fetch(statusUrl)
+    
+    if (!statusResponse.ok) {
+      if (statusResponse.status === 402) {
+        throw new Error('Browserless.io quota exceeded or payment required')
+      } else if (statusResponse.status === 401) {
+        throw new Error('Invalid Browserless.io API key')
+      } else {
+        throw new Error(`Browserless.io service error: ${statusResponse.status} ${statusResponse.statusText}`)
+      }
+    }
+
+    const status = await statusResponse.json()
+    logWithTimestamp('Browserless.io status check successful', {
+      webSocketDebuggerUrl: status.webSocketDebuggerUrl ? 'present' : 'missing',
+      browser: status.Browser,
+      protocol: status['Protocol-Version']
+    })
+
+    return true
+  } catch (error) {
+    const err = error as Error
+    logWithTimestamp('Browserless.io validation failed', {
+      error: err.message,
+      stack: err.stack
+    })
+    throw error
+  }
+}
+
 // Get browser connection based on environment
 async function getBrowser() {
   const isDev = process.env.NODE_ENV === 'development'
   
   logWithTimestamp('Initializing browser connection', {
     environment: isDev ? 'development' : 'production',
-    type: isDev ? 'local-chrome' : 'browserless.io'
+    type: isDev ? 'local-chrome' : 'browserless.io',
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch
   })
   
   if (isDev) {
@@ -202,12 +244,22 @@ async function getBrowser() {
   } else {
     // In production, use Browserless.io
     if (!process.env.BROWSERLESS_API_KEY) {
-      throw new Error('BROWSERLESS_API_KEY is required in production')
+      throw new Error('BROWSERLESS_API_KEY environment variable is required')
+    }
+
+    if (process.env.BROWSERLESS_API_KEY.includes('"')) {
+      throw new Error('BROWSERLESS_API_KEY contains quotes - please remove them')
     }
     
     try {
-      const wsEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`
-      logWithTimestamp('Connecting to Browserless.io', { wsEndpoint })
+      const wsEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}&--proxy-server=http://brd.superproxy.io:22225`
+      
+      // Validate connection before attempting to connect
+      await validateBrowserlessConnection(wsEndpoint)
+      
+      logWithTimestamp('Connecting to Browserless.io', { 
+        wsEndpoint: wsEndpoint.replace(/token=([^&]+)/, 'token=****') // Hide API key in logs
+      })
       
       const browser = await puppeteer.connect({
         browserWSEndpoint: wsEndpoint,
@@ -215,15 +267,35 @@ async function getBrowser() {
       })
       
       const version = await browser.version()
+      const wsConnection = browser.wsEndpoint()
+      
       logWithTimestamp('Connected to Browserless.io', {
         version,
-        targetCount: (await browser.targets()).length
+        wsConnection: wsConnection.replace(/token=([^&]+)/, 'token=****'),
+        targetCount: (await browser.targets()).length,
+        connected: browser.isConnected()
       })
       
       return browser
     } catch (error) {
-      console.error('Failed to connect to Browserless.io:', error)
-      throw new Error('Failed to connect to Browserless.io. Check your API key and service status.')
+      const err = error as Error
+      logWithTimestamp('Browserless.io connection error', {
+        message: err.message,
+        stack: err.stack,
+        apiKey: process.env.BROWSERLESS_API_KEY ? 'present' : 'missing',
+        apiKeyLength: process.env.BROWSERLESS_API_KEY?.length
+      })
+      
+      // Provide more specific error messages
+      if (err.message.includes('401')) {
+        throw new Error('Invalid Browserless.io API key - please check your environment variables')
+      } else if (err.message.includes('402')) {
+        throw new Error('Browserless.io quota exceeded - please check your usage limits')
+      } else if (err.message.includes('WebSocket')) {
+        throw new Error('Failed to establish WebSocket connection with Browserless.io - check your network and firewall settings')
+      }
+      
+      throw new Error(`Failed to connect to Browserless.io: ${err.message}`)
     }
   }
 }
