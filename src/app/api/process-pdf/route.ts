@@ -94,6 +94,24 @@ const EXAMPLE_COOKIES = [
   }
 ]
 
+// Validate environment variables
+const requiredEnvVars = {
+  AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+  AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  BROWSERLESS_API_KEY: process.env.BROWSERLESS_API_KEY,
+  IMSLP_COOKIES: process.env.IMSLP_COOKIES
+}
+
+// Check for missing environment variables
+const missingEnvVars = Object.entries(requiredEnvVars)
+  .filter(([_, value]) => !value)
+  .map(([key]) => key)
+
+if (missingEnvVars.length > 0) {
+  console.error('Missing required environment variables:', missingEnvVars)
+  throw new Error(`Missing required environment variables: ${missingEnvVars.join(', ')}`)
+}
+
 // Helper function for consistent logging
 function logWithTimestamp(message: string, data?: any) {
   const timestamp = new Date().toISOString()
@@ -101,6 +119,45 @@ function logWithTimestamp(message: string, data?: any) {
     ? `[${timestamp}] ${message} ${JSON.stringify(data, null, 2)}`
     : `[${timestamp}] ${message}`
   console.log(logMessage)
+}
+
+// Helper function to get page metrics
+async function getPageMetrics(page: any) {
+  try {
+    const metrics = await page.metrics()
+    const performance = await page.evaluate(() => ({
+      memory: performance.memory ? {
+        usedJSHeapSize: performance.memory.usedJSHeapSize,
+        totalJSHeapSize: performance.memory.totalJSHeapSize,
+      } : null,
+      timing: performance.timing
+    }))
+    return { metrics, performance }
+  } catch (error) {
+    console.error('Failed to get page metrics:', error)
+    return null
+  }
+}
+
+// Helper function to log page state
+async function logPageState(page: any, context: string) {
+  try {
+    const url = page.url()
+    const title = await page.title()
+    const metrics = await getPageMetrics(page)
+    const cookies = await page.cookies()
+    
+    logWithTimestamp(`Page State [${context}]`, {
+      url,
+      title,
+      metrics,
+      cookiesCount: cookies.length,
+      viewport: await page.viewport(),
+      isClosed: page.isClosed(),
+    })
+  } catch (error) {
+    console.error(`Failed to log page state for ${context}:`, error)
+  }
 }
 
 const s3Client = new S3Client({
@@ -115,28 +172,66 @@ const s3Client = new S3Client({
 async function getBrowser() {
   const isDev = process.env.NODE_ENV === 'development'
   
+  logWithTimestamp('Initializing browser connection', {
+    environment: isDev ? 'development' : 'production',
+    type: isDev ? 'local-chrome' : 'browserless.io'
+  })
+  
   if (isDev) {
-    // In development, connect to local Chrome instance
-    return await puppeteer.connect({
-      browserURL: 'http://localhost:9222',
-      defaultViewport: null,
-    })
+    try {
+      // In development, connect to local Chrome instance
+      const browser = await puppeteer.connect({
+        browserURL: 'http://localhost:9222',
+        defaultViewport: null,
+      })
+      
+      const version = await browser.version()
+      const wsEndpoint = browser.wsEndpoint()
+      
+      logWithTimestamp('Connected to local Chrome', {
+        version,
+        wsEndpoint,
+        targetCount: (await browser.targets()).length
+      })
+      
+      return browser
+    } catch (error) {
+      console.error('Failed to connect to local Chrome:', error)
+      throw new Error('Failed to connect to local Chrome. Make sure Chrome is running with --remote-debugging-port=9222')
+    }
   } else {
     // In production, use Browserless.io
     if (!process.env.BROWSERLESS_API_KEY) {
       throw new Error('BROWSERLESS_API_KEY is required in production')
     }
     
-    return await puppeteer.connect({
-      browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`,
-      defaultViewport: null,
-    })
+    try {
+      const wsEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`
+      logWithTimestamp('Connecting to Browserless.io', { wsEndpoint })
+      
+      const browser = await puppeteer.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: null,
+      })
+      
+      const version = await browser.version()
+      logWithTimestamp('Connected to Browserless.io', {
+        version,
+        targetCount: (await browser.targets()).length
+      })
+      
+      return browser
+    } catch (error) {
+      console.error('Failed to connect to Browserless.io:', error)
+      throw new Error('Failed to connect to Browserless.io. Check your API key and service status.')
+    }
   }
 }
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now()
   let browser;
+  let page;
 
   try {
     const { scoreUrl, slug } = await request.json()
@@ -149,23 +244,64 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
+    // Validate IMSLP cookies
+    if (!process.env.IMSLP_COOKIES) {
+      throw new Error('IMSLP_COOKIES environment variable is required')
+    }
+
+    let cookies;
+    try {
+      cookies = JSON.parse(process.env.IMSLP_COOKIES)
+      if (!Array.isArray(cookies)) {
+        throw new Error('IMSLP_COOKIES must be a JSON array')
+      }
+    } catch (error) {
+      console.error('Failed to parse IMSLP_COOKIES:', error)
+      throw new Error('Invalid IMSLP_COOKIES format. Must be a valid JSON array.')
+    }
+
     // Get browser instance based on environment
     browser = await getBrowser()
     logWithTimestamp('Browser connection established')
 
     // Create a new page in the browser
-    const page = await browser.newPage()
-    logWithTimestamp('New browser page created')
+    page = await browser.newPage()
+    logWithTimestamp('New page created', {
+      targetCount: (await browser.targets()).length,
+      pagesCount: (await browser.pages()).length
+    })
 
-    // Set cookies if available (can be stored in environment variables or database)
-    if (process.env.IMSLP_COOKIES) {
-      const cookies = JSON.parse(process.env.IMSLP_COOKIES)
-      await page.setCookie(...cookies)
-      logWithTimestamp('Cookies set from environment')
+    // Set up page event listeners
+    page.on('console', msg => logWithTimestamp('Browser Console:', {
+      type: msg.type(),
+      text: msg.text()
+    }))
+    
+    page.on('pageerror', error => logWithTimestamp('Browser Page Error:', {
+      message: error.message,
+      stack: error.stack
+    }))
+    
+    page.on('requestfailed', request => logWithTimestamp('Failed Request:', {
+      url: request.url(),
+      errorText: request.failure()?.errorText,
+      method: request.method()
+    }))
+
+    // Set cookies
+    try {
+      const currentCookies = await page.cookies()
+      logWithTimestamp('Cookies set successfully', {
+        cookiesCount: currentCookies.length,
+        domains: [...new Set(currentCookies.map(c => c.domain))]
+      })
+    } catch (error) {
+      console.error('Failed to set cookies:', error)
+      throw new Error('Failed to set IMSLP cookies')
     }
 
     // Navigate to IMSLP page
-    logWithTimestamp('Navigating to IMSLP page', { url: scoreUrl })
+    logWithTimestamp('Starting navigation to IMSLP page', { url: scoreUrl })
     const response = await page.goto(scoreUrl, { 
       waitUntil: 'networkidle0',
       timeout: 30000 
@@ -173,12 +309,21 @@ export async function POST(request: NextRequest) {
 
     if (!response) {
       logWithTimestamp('Failed to get response from IMSLP page')
+      await logPageState(page, 'navigation-failed')
       throw new Error('Failed to get response from IMSLP page')
     }
 
+    await logPageState(page, 'post-navigation')
+
     // Check if we got a PDF directly
     const contentType = response.headers()['content-type'] || ''
-    logWithTimestamp('Response content type', { contentType })
+    const status = response.status()
+    logWithTimestamp('Response details', { 
+      contentType,
+      status,
+      statusText: response.statusText(),
+      headers: response.headers()
+    })
 
     if (contentType.includes('application/pdf')) {
       logWithTimestamp('Direct PDF response received')
@@ -190,13 +335,18 @@ export async function POST(request: NextRequest) {
       const newKey = `${APPROVED_PREFIX}/${fileName}`
       logWithTimestamp('Uploading PDF to S3', { bucket: BUCKET_NAME, key: newKey })
       
-      await s3Client.send(new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: newKey,
-        Body: pdfBuffer,
-        ContentType: 'application/pdf',
-      }))
-      logWithTimestamp('S3 upload successful')
+      try {
+        await s3Client.send(new PutObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: newKey,
+          Body: pdfBuffer,
+          ContentType: 'application/pdf',
+        }))
+        logWithTimestamp('S3 upload successful')
+      } catch (error) {
+        console.error('Failed to upload to S3:', error)
+        throw new Error('Failed to upload PDF to S3')
+      }
       
       const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
       logWithTimestamp('Processing completed successfully', { 
@@ -213,14 +363,19 @@ export async function POST(request: NextRequest) {
     // Handle IMSLP download page
     logWithTimestamp('Handling IMSLP download page')
     
+    // Before clicking "I understand" button
+    await logPageState(page, 'before-understand-button')
+
     try {
       logWithTimestamp('Looking for "I understand" button')
       const understandButton = await page.waitForSelector('button:has-text("I understand")', { timeout: 5000 })
       if (understandButton) {
-        logWithTimestamp('"I understand" button found, clicking')
+        const buttonPosition = await understandButton.boundingBox()
+        logWithTimestamp('"I understand" button found', { buttonPosition })
         await understandButton.click()
         await page.waitForTimeout(1000)
         logWithTimestamp('"I understand" button clicked')
+        await logPageState(page, 'after-understand-button')
       }
     } catch (e) {
       logWithTimestamp('No immediate "I understand" button found')
@@ -228,32 +383,48 @@ export async function POST(request: NextRequest) {
 
     // Look for the download link
     logWithTimestamp('Looking for download link')
+    const pageContent = await page.content()
     const downloadLink = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a'))
-      return links.find(link => 
+      const pdfLink = links.find(link => 
         link.href?.includes('.pdf') || 
         link.getAttribute('data-id')?.includes('.pdf')
-      )?.href
+      )
+      return {
+        href: pdfLink?.href,
+        dataId: pdfLink?.getAttribute('data-id'),
+        text: pdfLink?.textContent,
+        isVisible: pdfLink ? window.getComputedStyle(pdfLink).display !== 'none' : false
+      }
     })
 
-    if (!downloadLink) {
-      logWithTimestamp('No download link found')
-      throw new Error('No download link found')
+    if (!downloadLink?.href) {
+      logWithTimestamp('No download link found', {
+        pageTitle: await page.title(),
+        currentUrl: page.url(),
+        pageContentLength: pageContent.length,
+        pageContentPreview: pageContent.substring(0, 1000)
+      })
+      throw new Error('No download link found on IMSLP page')
     }
 
-    logWithTimestamp('Found download link', { url: downloadLink })
+    logWithTimestamp('Found download link', downloadLink)
 
     // Download the PDF
     logWithTimestamp('Downloading PDF')
-    const pdfResponse = await page.goto(downloadLink, { waitUntil: 'networkidle0' })
+    const pdfResponse = await page.goto(downloadLink.href, { waitUntil: 'networkidle0' })
 
     if (!pdfResponse) {
       logWithTimestamp('Failed to download PDF')
-      throw new Error('Failed to download PDF')
+      throw new Error('Failed to download PDF from IMSLP')
     }
 
     const pdfBuffer = await pdfResponse.buffer()
     logWithTimestamp('PDF downloaded', { size: pdfBuffer.byteLength })
+
+    if (pdfBuffer.byteLength === 0) {
+      throw new Error('Downloaded PDF is empty')
+    }
 
     // Generate S3 key and upload
     const fileName = `${slug}.pdf`
@@ -265,15 +436,18 @@ export async function POST(request: NextRequest) {
 
     // Upload to S3
     logWithTimestamp('Starting S3 upload')
-    const uploadCommand = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
-      Key: newKey,
-      Body: pdfBuffer,
-      ContentType: 'application/pdf',
-    })
-
-    await s3Client.send(uploadCommand)
-    logWithTimestamp('S3 upload successful')
+    try {
+      await s3Client.send(new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: newKey,
+        Body: pdfBuffer,
+        ContentType: 'application/pdf',
+      }))
+      logWithTimestamp('S3 upload successful')
+    } catch (error) {
+      console.error('Failed to upload to S3:', error)
+      throw new Error('Failed to upload PDF to S3')
+    }
 
     const newUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/${newKey}`
     logWithTimestamp('Processing completed successfully', { 
@@ -295,6 +469,15 @@ export async function POST(request: NextRequest) {
       duration: Date.now() - startTime
     }
     
+    // Log final page state if available
+    if (page) {
+      try {
+        await logPageState(page, 'error-state')
+      } catch (e) {
+        console.error('Failed to log error page state:', e)
+      }
+    }
+    
     logWithTimestamp('PDF processing error', errorDetails)
     
     return NextResponse.json({ 
@@ -303,9 +486,19 @@ export async function POST(request: NextRequest) {
     }, { status: 500 })
   } finally {
     if (browser) {
-      logWithTimestamp('Disconnecting from browser')
-      await browser.disconnect()
-      logWithTimestamp('Browser disconnected')
+      try {
+        logWithTimestamp('Cleaning up browser resources', {
+          pagesCount: page ? (await browser.pages()).length : 0,
+          targetCount: (await browser.targets()).length
+        })
+        if (page && !page.isClosed()) {
+          await page.close()
+        }
+        await browser.disconnect()
+        logWithTimestamp('Browser cleanup completed')
+      } catch (error) {
+        console.error('Error during browser cleanup:', error)
+      }
     }
   }
 } 
