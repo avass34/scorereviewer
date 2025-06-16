@@ -68,6 +68,7 @@ export async function PATCH(request: NextRequest) {
             ? 'https://scorereviewer.vercel.app'
             : 'http://localhost:3000'
           
+          console.log('Making request to:', `${baseUrl}/api/generate-summary`)
           const summaryResponse = await fetch(`${baseUrl}/api/generate-summary`, {
             method: 'POST',
             headers: {
@@ -79,15 +80,27 @@ export async function PATCH(request: NextRequest) {
             }),
           })
 
-          if (summaryResponse.ok) {
-            const data = await summaryResponse.json()
-            updatedSummary = data.summary
-            console.log('Generated summary:', updatedSummary)
-          } else {
-            console.error('Failed to generate summary:', await summaryResponse.text())
+          if (!summaryResponse.ok) {
+            const errorText = await summaryResponse.text()
+            console.error('Failed to generate summary:', {
+              status: summaryResponse.status,
+              statusText: summaryResponse.statusText,
+              error: errorText
+            })
+            throw new Error(`Failed to generate summary: ${summaryResponse.status} ${summaryResponse.statusText}`)
           }
+
+          const data = await summaryResponse.json()
+          if (!data.summary) {
+            console.error('No summary in response:', data)
+            throw new Error('No summary in response')
+          }
+
+          updatedSummary = data.summary
+          console.log('Generated summary:', updatedSummary)
         } catch (error) {
           console.error('Error generating summary:', error)
+          // Don't throw here, just log the error and continue with existing summary
         }
       }
 

@@ -33,6 +33,7 @@ export default function ReviewedPiecesPage() {
   const [totalPages, setTotalPages] = useState(1)
   const [isSearching, setIsSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<PieceWithEditions[]>([])
+  const [selectedEdition, setSelectedEdition] = useState<string | null>(null)
 
   const fetchPieces = async (page: number) => {
     try {
@@ -338,13 +339,47 @@ export default function ReviewedPiecesPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
-                    <span className="px-4 py-2 bg-emerald-600/20 text-emerald-400 rounded-full text-sm font-medium border border-emerald-600/50">
-                      Reviewed
+                    <span className={`px-4 py-2 rounded-full text-sm font-medium ${
+                      piece.status === 'reviewed' 
+                        ? 'bg-[#e14f3d]/20 text-[#e14f3d] border border-[#e14f3d]/50' 
+                        : 'bg-amber-600/20 text-amber-400 border border-amber-600/50'
+                    }`}>
+                      {(piece.status || 'unreviewed').charAt(0).toUpperCase() + (piece.status || 'unreviewed').slice(1)}
                     </span>
-                    {piece.reviewedAt && (
-                      <span className="text-sm text-gray-400">
-                        {new Date(piece.reviewedAt).toLocaleDateString()}
-                      </span>
+                    {piece.status === 'reviewed' && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            setPieces(prevPieces => prevPieces.filter(p => p._id !== piece._id))
+                            setSearchResults(prevResults => prevResults.filter(p => p._id !== piece._id))
+
+                            const response = await fetch('/api/pieces', {
+                              method: 'PATCH',
+                              headers: {
+                                'Content-Type': 'application/json',
+                              },
+                              body: JSON.stringify({
+                                pieceId: piece._id,
+                                status: 'unreviewed',
+                              }),
+                            })
+
+                            if (!response.ok) {
+                              throw new Error('Failed to update piece status')
+                            }
+                          } catch (err) {
+                            console.error('Error updating piece status:', err)
+                            setError('Failed to update piece status')
+                            fetchPieces(currentPage)
+                          }
+                        }}
+                        className="px-6 py-3 bg-[#333333] text-white rounded-lg hover:bg-[#222222] transition-colors duration-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                        Mark as Unreviewed
+                      </button>
                     )}
                   </div>
                 </div>
@@ -388,14 +423,79 @@ export default function ReviewedPiecesPage() {
                             )}
                             
                             <div className="flex items-center gap-3">
-                              {edition.status === 'approved' && (
-                                <div className="flex items-center gap-3">
-                                  <div className="px-4 py-2 bg-[#e14f3d]/20 text-[#e14f3d] rounded-lg border border-[#e14f3d]/50 flex items-center gap-2">
+                              {edition.status === 'unreviewed' && (
+                                <>
+                                  <button
+                                    onClick={() => handleEditionStatusChange(edition, 'approved')}
+                                    disabled={changingStatus === edition._id}
+                                    className="px-4 py-2 bg-[#e14f3d] text-white rounded-lg hover:bg-[#e14f3d]/90 disabled:opacity-50 disabled:hover:bg-[#e14f3d] transition-colors duration-200 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                                  >
                                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                       <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                                     </svg>
-                                    Approved
+                                    Approve
+                                  </button>
+                                  <button
+                                    onClick={() => handleEditionStatusChange(edition, 'rejected')}
+                                    disabled={changingStatus === edition._id}
+                                    className="px-4 py-2 bg-[#333333] text-white rounded-lg hover:bg-[#222222] disabled:opacity-50 disabled:hover:bg-[#333333] transition-colors duration-200 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                    </svg>
+                                    Reject
+                                  </button>
+                                </>
+                              )}
+                              {edition.status === 'approved' && (
+                                <div className="flex items-center gap-3">
+                                  <div className="relative">
+                                    <button
+                                      onClick={() => setSelectedEdition(selectedEdition === edition._id ? null : edition._id)}
+                                      className="px-4 py-2 bg-[#e14f3d]/20 text-[#e14f3d] rounded-lg border border-[#e14f3d]/50 flex items-center gap-2 hover:bg-[#e14f3d]/30 transition-colors duration-200"
+                                    >
+                                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                      </svg>
+                                      Approved
+                                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                                      </svg>
+                                    </button>
+                                    {selectedEdition === edition._id && (
+                                      <div className="absolute right-0 mt-2 w-48 bg-[#222222] rounded-lg shadow-lg border border-[#333333] z-10">
+                                        <button
+                                          onClick={() => {
+                                            handleEditionStatusChange(edition, 'unreviewed')
+                                            setSelectedEdition(null)
+                                          }}
+                                          className="w-full px-4 py-2 text-left text-white hover:bg-[#333333] transition-colors duration-200 flex items-center gap-2"
+                                        >
+                                          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
+                                          </svg>
+                                          Mark as Unreviewed
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            handleEditionStatusChange(edition, 'rejected')
+                                            setSelectedEdition(null)
+                                          }}
+                                          className="w-full px-4 py-2 text-left text-white hover:bg-[#333333] transition-colors duration-200 flex items-center gap-2"
+                                        >
+                                          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-[#e14f3d]" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                          </svg>
+                                          Mark as Rejected
+                                        </button>
+                                      </div>
+                                    )}
                                   </div>
+                                  {edition.reviewedAt && (
+                                    <span className="text-sm text-gray-400">
+                                      {new Date(edition.reviewedAt).toLocaleDateString()}
+                                    </span>
+                                  )}
                                 </div>
                               )}
                               {edition.status === 'rejected' && (
@@ -406,15 +506,29 @@ export default function ReviewedPiecesPage() {
                                     </svg>
                                     Rejected
                                   </div>
+                                  <button
+                                    onClick={() => handleEditionStatusChange(edition, 'approved')}
+                                    disabled={changingStatus === edition._id}
+                                    className="px-4 py-2 bg-[#e14f3d] text-white rounded-lg hover:bg-[#e14f3d]/90 disabled:opacity-50 disabled:hover:bg-[#e14f3d] transition-colors duration-200 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                    </svg>
+                                    Approve
+                                  </button>
                                   {edition.rejectionReason && (
                                     <span className="text-sm text-[#e14f3d]">Reason: {edition.rejectionReason}</span>
                                   )}
                                 </div>
                               )}
-                              {edition.reviewedAt && (
-                                <span className="text-sm text-gray-400">
-                                  {new Date(edition.reviewedAt).toLocaleDateString()}
-                                </span>
+                              {changingStatus === edition._id && (
+                                <div className="flex items-center gap-2 text-gray-400">
+                                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                  </svg>
+                                  <span>Updating...</span>
+                                </div>
                               )}
                             </div>
                           </div>
