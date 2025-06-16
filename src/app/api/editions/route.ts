@@ -48,6 +48,7 @@ export async function PATCH(request: NextRequest) {
           url,
           "piece": *[_type == "piece" && references(^._id)][0] {
             _id,
+            _type,
             piece_title,
             composer,
             year_of_composition,
@@ -61,6 +62,17 @@ export async function PATCH(request: NextRequest) {
           console.error('Edition not found:', editionId)
           return NextResponse.json({ error: 'Edition not found' }, { status: 404 })
         }
+
+        if (!editionData.piece) {
+          console.error('Piece not found for edition:', editionId)
+          return NextResponse.json({ error: 'Piece not found for edition' }, { status: 404 })
+        }
+
+        console.log('Fetched edition data:', {
+          editionId: editionData._id,
+          pieceId: editionData.piece._id,
+          pieceTitle: editionData.piece.piece_title
+        })
 
         // Get the edition slug
         const editionSlug = editionData.slug?.current
@@ -189,6 +201,7 @@ export async function POST(request: NextRequest) {
           url,
           "piece": *[_type == "piece" && references(^._id)][0] {
             _id,
+            _type,
             piece_title,
             composer,
             year_of_composition,
@@ -202,6 +215,17 @@ export async function POST(request: NextRequest) {
           console.error('Edition not found:', editionId)
           return NextResponse.json({ error: 'Edition not found' }, { status: 404 })
         }
+
+        if (!editionData.piece) {
+          console.error('Piece not found for edition:', editionId)
+          return NextResponse.json({ error: 'Piece not found for edition' }, { status: 404 })
+        }
+
+        console.log('Fetched edition data:', {
+          editionId: editionData._id,
+          pieceId: editionData.piece._id,
+          pieceTitle: editionData.piece.piece_title
+        })
 
         // Get the edition slug
         const editionSlug = editionData.slug?.current
