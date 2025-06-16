@@ -76,18 +76,17 @@ export async function PATCH(request: NextRequest) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            editionId,
-            editionSlug,
-            pieceId: editionData.piece._id,
-            pieceSlug: editionData.piece.slug?.current,
-            pieceTitle: editionData.piece.piece_title,
-            composer: editionData.piece.composer,
-            yearOfComposition: editionData.piece.year_of_composition,
-            era: editionData.piece.era,
-            publisher: editionData.publisher,
-            copyright: editionData.copyright,
-            editor: editionData.editor,
-            url: editionData.url,
+            action: 'add_edition',
+            data: {
+              _id: editionData._id,
+              _type: editionData._type,
+              slug: editionData.slug,
+              publisher: editionData.publisher,
+              copyright: editionData.copyright,
+              editor: editionData.editor,
+              url: editionData.url,
+              piece: editionData.piece
+            }
           }),
         })
 
@@ -206,18 +205,17 @@ export async function POST(request: NextRequest) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            editionId,
-            editionSlug,
-            pieceId: editionData.piece._id,
-            pieceSlug: editionData.piece.slug?.current,
-            pieceTitle: editionData.piece.piece_title,
-            composer: editionData.piece.composer,
-            yearOfComposition: editionData.piece.year_of_composition,
-            era: editionData.piece.era,
-            publisher: editionData.publisher,
-            copyright: editionData.copyright,
-            editor: editionData.editor,
-            url: editionData.url,
+            action: 'add_edition',
+            data: {
+              _id: editionData._id,
+              _type: editionData._type,
+              slug: editionData.slug,
+              publisher: editionData.publisher,
+              copyright: editionData.copyright,
+              editor: editionData.editor,
+              url: editionData.url,
+              piece: editionData.piece
+            }
           }),
         })
 

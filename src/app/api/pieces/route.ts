@@ -132,13 +132,17 @@ export async function PATCH(request: NextRequest) {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              pieceId,
-              pieceSlug,
-              pieceTitle: pieceData.piece_title,
-              composer: pieceData.composer,
-              yearOfComposition: pieceData.year_of_composition,
-              era: pieceData.era,
-              summary: pieceData.summary,
+              action: 'add_piece',
+              data: {
+                _id: pieceData._id,
+                _type: pieceData._type,
+                piece_title: pieceData.piece_title,
+                composer: pieceData.composer,
+                year_of_composition: pieceData.year_of_composition,
+                era: pieceData.era,
+                slug: pieceData.slug,
+                summary: pieceData.summary
+              }
             }),
           })
 
