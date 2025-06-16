@@ -46,7 +46,7 @@ export async function PATCH(request: NextRequest) {
           copyright,
           editor,
           url,
-          "piece": *[_type == "piece" && references(^._id)][0] {
+          piece-> {
             _id,
             _type,
             piece_title,
@@ -204,7 +204,7 @@ export async function POST(request: NextRequest) {
           copyright,
           editor,
           url,
-          "piece": *[_type == "piece" && references(^._id)][0] {
+          piece-> {
             _id,
             _type,
             piece_title,
