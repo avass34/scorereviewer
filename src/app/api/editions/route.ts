@@ -80,12 +80,24 @@ export async function PATCH(request: NextRequest) {
             data: {
               _id: editionData._id,
               _type: editionData._type,
-              slug: editionData.slug,
+              slug: {
+                current: editionData.slug?.current
+              },
               publisher: editionData.publisher,
               copyright: editionData.copyright,
               editor: editionData.editor,
               url: editionData.url,
-              piece: editionData.piece
+              piece: {
+                _id: editionData.piece._id,
+                _type: editionData.piece._type,
+                piece_title: editionData.piece.piece_title,
+                composer: editionData.piece.composer,
+                year_of_composition: editionData.piece.year_of_composition,
+                era: editionData.piece.era,
+                slug: {
+                  current: editionData.piece.slug?.current
+                }
+              }
             }
           }),
         })
@@ -209,12 +221,24 @@ export async function POST(request: NextRequest) {
             data: {
               _id: editionData._id,
               _type: editionData._type,
-              slug: editionData.slug,
+              slug: {
+                current: editionData.slug?.current
+              },
               publisher: editionData.publisher,
               copyright: editionData.copyright,
               editor: editionData.editor,
               url: editionData.url,
-              piece: editionData.piece
+              piece: {
+                _id: editionData.piece._id,
+                _type: editionData.piece._type,
+                piece_title: editionData.piece.piece_title,
+                composer: editionData.piece.composer,
+                year_of_composition: editionData.piece.year_of_composition,
+                era: editionData.piece.era,
+                slug: {
+                  current: editionData.piece.slug?.current
+                }
+              }
             }
           }),
         })
