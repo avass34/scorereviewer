@@ -59,48 +59,32 @@ export async function PATCH(request: NextRequest) {
         throw new Error('Piece not found')
       }
 
-      // Generate summary if it doesn't exist
-      let updatedSummary = piece.summary
-      if (!updatedSummary) {
+      // Generate summary if needed
+      if (summary) {
         try {
-          console.log('Generating summary for piece:', piece.piece_title)
-          const baseUrl = process.env.VERCEL === '1'
+          const baseUrl = process.env.VERCEL === '1' 
             ? 'https://scorereviewer.vercel.app'
             : 'http://localhost:3000'
-          
-          console.log('Making request to:', `${baseUrl}/api/generate-summary`)
-          const summaryResponse = await fetch(`${baseUrl}/api/generate-summary`, {
+
+          const response = await fetch(`${baseUrl}/api/generate-summary`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              pieceName: piece.piece_title,
-              composerName: piece.composer,
+              pieceId,
+              summary,
             }),
           })
 
-          if (!summaryResponse.ok) {
-            const errorText = await summaryResponse.text()
-            console.error('Failed to generate summary:', {
-              status: summaryResponse.status,
-              statusText: summaryResponse.statusText,
-              error: errorText
-            })
-            throw new Error(`Failed to generate summary: ${summaryResponse.status} ${summaryResponse.statusText}`)
+          if (!response.ok) {
+            const error = await response.json()
+            console.error('Failed to generate summary:', error)
+            // Don't fail the request if summary generation fails
           }
-
-          const data = await summaryResponse.json()
-          if (!data.summary) {
-            console.error('No summary in response:', data)
-            throw new Error('No summary in response')
-          }
-
-          updatedSummary = data.summary
-          console.log('Generated summary:', updatedSummary)
         } catch (error) {
           console.error('Error generating summary:', error)
-          // Don't throw here, just log the error and continue with existing summary
+          // Don't fail the request if summary generation fails
         }
       }
 
@@ -109,34 +93,63 @@ export async function PATCH(request: NextRequest) {
         .patch(pieceId)
         .set({ 
           status,
-          summary: updatedSummary || piece.summary
+          summary: summary || piece.summary
         })
         .commit()
 
-      // If the piece is being marked as reviewed, add it to the sheets
+      // Handle sheets integration
       if (status === 'reviewed') {
-        // Add to sheets with the updated summary
-        const pieceWithSummary = {
-          ...piece,
-          summary: updatedSummary || piece.summary
-        }
+        try {
+          // Get the full piece data
+          const pieceQuery = `*[_type == "piece" && _id == $pieceId][0] {
+            _id,
+            _type,
+            piece_title,
+            composer,
+            year_of_composition,
+            era,
+            slug,
+            summary
+          }`
+          const pieceData = await client.fetch(pieceQuery, { pieceId })
+          
+          if (!pieceData) {
+            console.error('Piece not found:', pieceId)
+            return NextResponse.json({ error: 'Piece not found' }, { status: 404 })
+          }
 
-        const baseUrl = getBaseUrl()
-        const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'add_piece',
-            data: pieceWithSummary,
-          }),
-        })
+          // Get the piece slug
+          const pieceSlug = pieceData.slug?.current
 
-        if (!sheetsResponse.ok) {
-          const error = await sheetsResponse.json()
-          console.error('Failed to add piece to sheets:', error)
-          throw new Error('Failed to add piece to sheets')
+          // Add to sheets
+          const baseUrl = process.env.VERCEL === '1' 
+            ? 'https://scorereviewer.vercel.app'
+            : 'http://localhost:3000'
+
+          const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              pieceId,
+              pieceSlug,
+              pieceTitle: pieceData.piece_title,
+              composer: pieceData.composer,
+              yearOfComposition: pieceData.year_of_composition,
+              era: pieceData.era,
+              summary: pieceData.summary,
+            }),
+          })
+
+          if (!sheetsResponse.ok) {
+            const errorData = await sheetsResponse.json()
+            console.error('Failed to add to sheets:', errorData)
+            // Don't fail the request if sheets integration fails
+          }
+        } catch (error) {
+          console.error('Error in sheets integration:', error)
+          // Don't fail the request if sheets integration fails
         }
       }
 

@@ -36,54 +36,69 @@ export async function PATCH(request: NextRequest) {
 
     // Handle sheets integration based on status
     if (status === 'approved') {
-      // Fetch the full edition data
-      const edition = await client.fetch(
-        groq`*[_type == "edition" && _id == $editionId][0]{
+      try {
+        // Get the full edition data
+        const editionQuery = `*[_type == "edition" && _id == $editionId][0] {
           _id,
           _type,
           slug,
-          editor,
           publisher,
           copyright,
+          editor,
           url,
-          piece->{
+          "piece": *[_type == "piece" && references(^._id)][0] {
             _id,
-            _type,
-            slug,
             piece_title,
             composer,
             year_of_composition,
             era,
-            summary
+            slug
           }
-        }`,
-        { editionId }
-      )
+        }`
+        const editionData = await client.fetch(editionQuery, { editionId })
+        
+        if (!editionData) {
+          console.error('Edition not found:', editionId)
+          return NextResponse.json({ error: 'Edition not found' }, { status: 404 })
+        }
 
-      if (!edition) {
-        throw new Error('Edition not found after update')
-      }
+        // Get the edition slug
+        const editionSlug = editionData.slug?.current
 
-      // Add to sheets
-      const baseUrl = process.env.VERCEL === '1'
-        ? 'https://scorereviewer.vercel.app'
-        : 'http://localhost:3000'
+        // Add to sheets
+        const baseUrl = process.env.VERCEL === '1' 
+          ? 'https://scorereviewer.vercel.app'
+          : 'http://localhost:3000'
 
-      const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'add_edition',
-          data: edition,
-        }),
-      })
+        const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            editionId,
+            editionSlug,
+            pieceId: editionData.piece._id,
+            pieceSlug: editionData.piece.slug?.current,
+            pieceTitle: editionData.piece.piece_title,
+            composer: editionData.piece.composer,
+            yearOfComposition: editionData.piece.year_of_composition,
+            era: editionData.piece.era,
+            publisher: editionData.publisher,
+            copyright: editionData.copyright,
+            editor: editionData.editor,
+            url: editionData.url,
+          }),
+        })
 
-      if (!sheetsResponse.ok) {
-        const error = await sheetsResponse.json()
-        console.error('Failed to add edition to sheets:', error)
-        throw new Error('Failed to add edition to sheets')
+        if (!sheetsResponse.ok) {
+          const errorData = await sheetsResponse.json()
+          console.error('Failed to add to sheets:', errorData)
+          // Don't fail the request if sheets integration fails
+        }
+      } catch (error) {
+        console.error('Error in sheets integration:', error)
+        // Don't fail the request if sheets integration fails
       }
     } else if (status === 'rejected') {
       // Fetch the edition slug
@@ -151,54 +166,69 @@ export async function POST(request: NextRequest) {
 
     // Handle sheets integration based on status
     if (status === 'approved') {
-      // Fetch the full edition data
-      const edition = await client.fetch(
-        groq`*[_type == "edition" && _id == $editionId][0]{
+      try {
+        // Get the full edition data
+        const editionQuery = `*[_type == "edition" && _id == $editionId][0] {
           _id,
           _type,
           slug,
-          editor,
           publisher,
           copyright,
+          editor,
           url,
-          piece->{
+          "piece": *[_type == "piece" && references(^._id)][0] {
             _id,
-            _type,
-            slug,
             piece_title,
             composer,
             year_of_composition,
             era,
-            summary
+            slug
           }
-        }`,
-        { editionId }
-      )
+        }`
+        const editionData = await client.fetch(editionQuery, { editionId })
+        
+        if (!editionData) {
+          console.error('Edition not found:', editionId)
+          return NextResponse.json({ error: 'Edition not found' }, { status: 404 })
+        }
 
-      if (!edition) {
-        throw new Error('Edition not found after update')
-      }
+        // Get the edition slug
+        const editionSlug = editionData.slug?.current
 
-      // Add to sheets
-      const baseUrl = process.env.VERCEL === '1'
-        ? 'https://scorereviewer.vercel.app'
-        : 'http://localhost:3000'
+        // Add to sheets
+        const baseUrl = process.env.VERCEL === '1' 
+          ? 'https://scorereviewer.vercel.app'
+          : 'http://localhost:3000'
 
-      const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'add_edition',
-          data: edition,
-        }),
-      })
+        const sheetsResponse = await fetch(`${baseUrl}/api/sheets`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            editionId,
+            editionSlug,
+            pieceId: editionData.piece._id,
+            pieceSlug: editionData.piece.slug?.current,
+            pieceTitle: editionData.piece.piece_title,
+            composer: editionData.piece.composer,
+            yearOfComposition: editionData.piece.year_of_composition,
+            era: editionData.piece.era,
+            publisher: editionData.publisher,
+            copyright: editionData.copyright,
+            editor: editionData.editor,
+            url: editionData.url,
+          }),
+        })
 
-      if (!sheetsResponse.ok) {
-        const error = await sheetsResponse.json()
-        console.error('Failed to add edition to sheets:', error)
-        throw new Error('Failed to add edition to sheets')
+        if (!sheetsResponse.ok) {
+          const errorData = await sheetsResponse.json()
+          console.error('Failed to add to sheets:', errorData)
+          // Don't fail the request if sheets integration fails
+        }
+      } catch (error) {
+        console.error('Error in sheets integration:', error)
+        // Don't fail the request if sheets integration fails
       }
     } else if (status === 'rejected') {
       // Fetch the edition slug
