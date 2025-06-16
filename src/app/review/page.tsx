@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { createClient } from '@sanity/client'
-import { Score } from '@/types/score'
+import { Piece } from '@/types/piece'
+import { Edition } from '@/types/edition'
 import Link from 'next/link'
-import debounce from 'lodash/debounce'
 
 const client = createClient({
   projectId: process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
@@ -13,372 +13,187 @@ const client = createClient({
   apiVersion: '2024-02-20',
 })
 
-const SCORES_PER_PAGE = 10
+const PIECES_PER_PAGE = 5
+
+type FilterStatus = 'all' | 'unreviewed' | 'reviewed'
+
+interface PieceWithEditions extends Piece {
+  editions: Edition[]
+}
 
 export default function ReviewPage() {
-  const [scores, setScores] = useState<Score[]>([])
-  const [searchResults, setSearchResults] = useState<Score[]>([])
-  const [currentScoreIndex, setCurrentScoreIndex] = useState(0)
+  const [pieces, setPieces] = useState<PieceWithEditions[]>([])
   const [loading, setLoading] = useState(true)
-  const [searchLoading, setSearchLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [filterStatus, setFilterStatus] = useState<FilterStatus>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [showDropdown, setShowDropdown] = useState(false)
+  const [changingStatus, setChangingStatus] = useState<string | null>(null)
+  const [selectedEdition, setSelectedEdition] = useState<Edition | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
-  const [totalScores, setTotalScores] = useState(0)
-  const [rejectionReason, setRejectionReason] = useState('')
-  const [scoreWindow, setScoreWindow] = useState<Window | null>(null)
-  const searchRef = useRef<HTMLDivElement>(null)
+  const [totalPieces, setTotalPieces] = useState(0)
+  const [searchResults, setSearchResults] = useState<PieceWithEditions[]>([])
+  const [isSearching, setIsSearching] = useState(false)
 
-  const currentScore = scores[currentScoreIndex]
-  const totalPages = Math.ceil(totalScores / SCORES_PER_PAGE)
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
-        setShowDropdown(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Function to ensure window is open and navigate to URL
-  const openScoreInWindow = (url: string) => {
-    console.log('Opening score window with initial URL:', url)
-    
-    // Create a proxy HTML file that will help us get the final URL
-    const proxyHtml = `
-      <!DOCTYPE html>
-      <html>
-      <head><title>Score Viewer</title></head>
-      <body>
-        <script>
-        // Function to send URL back to parent
-        function sendUrlToParent() {
-          const currentUrl = window.location.href;
-          console.log('Current URL in score window:', currentUrl);
-          window.opener.postMessage({
-            type: 'SCORE_URL_UPDATE',
-            url: currentUrl
-          }, '*');
-        }
-
-        // Set up interval to check URL changes
-        const intervalId = setInterval(sendUrlToParent, 1000);
-        console.log('Starting URL check interval');
-
-        // Navigate to the score URL
-        console.log('Navigating to:', "${url}");
-        window.location.href = "${url}";
-        </script>
-        <div>Loading score...</div>
-      </body>
-      </html>
-    `;
-
-    console.log('Creating proxy page for URL:', url)
-    
-    // Create a blob URL for our proxy HTML
-    const blob = new Blob([proxyHtml], { type: 'text/html' });
-    const proxyUrl = URL.createObjectURL(blob);
-    console.log('Created proxy URL:', proxyUrl)
-
-    if (scoreWindow && !scoreWindow.closed) {
-      console.log('Reusing existing window')
-      scoreWindow.location.href = proxyUrl
-      scoreWindow.focus()
-    } else {
-      console.log('Opening new window')
-      const newWindow = window.open(proxyUrl, 'scoreWindow', 'width=800,height=600')
-      if (newWindow) {
-        console.log('New window created successfully')
-        setScoreWindow(newWindow)
-      } else {
-        console.error('Failed to create new window')
-      }
-    }
-
-    // Clean up the blob URL after use
-    setTimeout(() => {
-      console.log('Cleaning up proxy URL')
-      URL.revokeObjectURL(proxyUrl)
-    }, 1000);
-  }
-
-  // Set up message listener for URL updates
-  useEffect(() => {
-    function handleMessage(event: MessageEvent) {
-      console.log('Received message:', event.data)
-      
-      if (event.data?.type === 'SCORE_URL_UPDATE') {
-        const newUrl = event.data.url
-        console.log('Processing URL update:', {
-          previous: currentScore?.scoreUrl,
-          new: newUrl,
-          isChange: currentScore?.scoreUrl !== newUrl
-        })
-        
-        if (newUrl !== currentScore?.scoreUrl) {
-          console.log('Updating current PDF URL to:', newUrl)
-          setCurrentScoreIndex(0)
-          setScores((prev) => prev.map((score) =>
-            score._id === currentScore?._id ? { ...score, scoreUrl: newUrl } : score
-          ))
-        }
-      }
-    }
-
-    console.log('Setting up message listener')
-    window.addEventListener('message', handleMessage)
-    return () => {
-      console.log('Cleaning up message listener')
-      window.removeEventListener('message', handleMessage)
-    }
-  }, [currentScore])
-
-  const fetchScores = async (page: number) => {
+  const fetchPieces = async (page: number) => {
     try {
       setLoading(true)
-      console.log('Fetching scores...', { page })
-      
-      // Build the GROQ query with pagination
-      let query = '*[_type == "score" && status == "unreviewed"] | order(_createdAt asc)'
-      
-      // Get total count for pagination
-      const countQuery = `count(${query})`
-      const totalCount = await client.fetch<number>(countQuery)
-      setTotalScores(totalCount)
+      console.log('Fetching pieces page:', page)
 
-      // Add pagination
-      query += ` [${page * SCORES_PER_PAGE}...${(page + 1) * SCORES_PER_PAGE}]`
+      // First get total count
+      const countQuery = `count(*[_type == "piece" ${
+        filterStatus !== 'all' ? `&& status == "${filterStatus}"` : ''
+      }])`
+      const total = await client.fetch<number>(countQuery)
+      setTotalPieces(total)
 
-      const result = await client.fetch<Score[]>(query)
-      console.log('Fetched scores:', result)
-      
-      setScores(result)
-      setCurrentScoreIndex(0)
-      
-      // Open first score when loaded
-      if (result.length > 0) {
-        openScoreInWindow(result[0].scoreUrl)
-      }
+      // Then fetch the current page
+      let query = `*[_type == "piece" ${
+        filterStatus !== 'all' ? `&& status == "${filterStatus}"` : ''
+      } && status != "reviewed"] | order(_createdAt desc) [$start...$end] {
+        _id,
+        _type,
+        piece_title,
+        composer,
+        year_of_composition,
+        era,
+        "status": coalesce(status, "unreviewed"),
+        slug,
+        "editions": *[_type == "edition" && references(^._id)] {
+          _id,
+          _type,
+          slug,
+          publisher,
+          copyright,
+          editor,
+          url,
+          "status": coalesce(status, "unreviewed"),
+          rejectionReason,
+          reviewedAt
+        }
+      }`
+
+      const result = await client.fetch<PieceWithEditions[]>(query, {
+        start: page * PIECES_PER_PAGE,
+        end: (page + 1) * PIECES_PER_PAGE
+      })
+      console.log('Fetched pieces:', result)
+      setPieces(result)
     } catch (err) {
-      console.error('Error fetching scores:', err)
-      setError('Failed to fetch scores')
+      console.error('Error fetching pieces:', err)
+      setError('Failed to fetch pieces')
     } finally {
       setLoading(false)
     }
   }
 
-  // Debounced search function
-  const searchScores = useCallback(
-    debounce(async (search: string) => {
-      if (!search.trim()) {
-        setSearchResults([])
-        setShowDropdown(false)
-        return
-      }
-
-      try {
-        setSearchLoading(true)
-        const query = `*[_type == "score" && status == "unreviewed" && (
-          pieceName match "*${search}*" || 
-          composerName match "*${search}*"
-        )] | order(_createdAt asc)[0...10]`
-        
-        const results = await client.fetch<Score[]>(query)
-        setSearchResults(results)
-        setShowDropdown(true)
-      } catch (err) {
-        console.error('Search error:', err)
-      } finally {
-        setSearchLoading(false)
-      }
-    }, 300),
-    []
-  )
-
-  // Handle search input change
-  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newSearch = e.target.value
-    setSearchQuery(newSearch)
-    searchScores(newSearch)
-  }
-
-  // Handle selecting a score from search
-  const handleScoreSelect = (score: Score) => {
-    setScores([score])
-    setCurrentScoreIndex(0)
-    setShowDropdown(false)
-    setSearchQuery('')
-    openScoreInWindow(score.scoreUrl)
-  }
-
-  // Handle page change
-  const handlePageChange = (newPage: number) => {
-    setCurrentPage(newPage)
-    fetchScores(newPage)
-  }
-
-  useEffect(() => {
-    fetchScores(currentPage)
-    return () => {
-      searchScores.cancel()
-    }
-  }, [])
-
-  const handlePreviousScore = () => {
-    const newIndex = Math.max(0, currentScoreIndex - 1)
-    setCurrentScoreIndex(newIndex)
-    setRejectionReason('')
-    if (scores[newIndex]) {
-      openScoreInWindow(scores[newIndex].scoreUrl)
-    }
-  }
-
-  const handleNextScore = () => {
-    const newIndex = Math.min(scores.length - 1, currentScoreIndex + 1)
-    setCurrentScoreIndex(newIndex)
-    setRejectionReason('')
-    if (scores[newIndex]) {
-      openScoreInWindow(scores[newIndex].scoreUrl)
-    }
-  }
-
-  // Clean up window on unmount
-  useEffect(() => {
-    return () => {
-      if (scoreWindow) {
-        scoreWindow.close()
-      }
-    }
-  }, [scoreWindow])
-
-  const handleApprove = async () => {
-    if (!currentScore) return
-
-    // Immediately update UI and move to next score
-    const scoreToProcess = currentScore
-    setScores((prev) => prev.filter((_, i) => i !== currentScoreIndex))
-    setCurrentScoreIndex((prev) => Math.min(prev, scores.length - 2))
-
-    try {
-      console.log('Starting approval process for:', {
-        pieceName: scoreToProcess.pieceName,
-        composerName: scoreToProcess.composerName,
-        originalUrl: scoreToProcess.scoreUrl
-      })
-
-      // Update Sanity database
-      console.log('Updating score status in database...')
-      const updateResponse = await fetch('/api/scores', {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          scoreId: scoreToProcess._id,
-          status: 'approved',
-          scoreUrl: scoreToProcess.scoreUrl,
-          reviewedAt: new Date().toISOString(),
-        }),
-      })
-
-      if (!updateResponse.ok) {
-        const errorData = await updateResponse.json()
-        throw new Error(`Failed to update score status: ${errorData.error || updateResponse.statusText}`)
-      }
-
-      // Add to Google Sheets
-      console.log('Adding score to Google Sheets...')
-      const sheetsResponse = await fetch('/api/sheets', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'add',
-          score: {
-            ...scoreToProcess,
-            status: 'approved',
-          },
-        }),
-      })
-
-      if (!sheetsResponse.ok) {
-        const errorData = await sheetsResponse.json()
-        console.error('Failed to add to Google Sheets:', {
-          status: sheetsResponse.status,
-          statusText: sheetsResponse.statusText,
-          error: errorData
-        })
-        console.warn('Score approved but failed to add to Google Sheets')
-      } else {
-        console.log('Successfully added to Google Sheets')
-      }
-
-      console.log('Score successfully approved and updated')
-    } catch (error) {
-      const err = error as Error
-      console.error('Failed to process approval:', {
-        error: err,
-        errorMessage: err.message,
-        errorStack: err.stack
-      })
-      setError(`Failed to process approval: ${err.message}`)
-      
-      // Restore the score in the list since we failed
-      setScores(prev => {
-        const newScores = [...prev]
-        newScores.splice(currentScoreIndex, 0, scoreToProcess)
-        return newScores
-      })
-    }
-  }
-
-  const handleReject = async () => {
-    if (!currentScore) return
-
-    // Immediately update UI and move to next score
-    const scoreToProcess = currentScore
-    const reasonToProcess = rejectionReason
-    setScores((prev) => prev.filter((_, i) => i !== currentScoreIndex))
-    const newIndex = Math.min(currentScoreIndex, scores.length - 2)
-    setCurrentScoreIndex(newIndex)
-    setRejectionReason('')
-
-    // Open the next score in the proxy window
-    if (scores[newIndex + 1]) {
-      openScoreInWindow(scores[newIndex + 1].scoreUrl)
+  const searchPieces = async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults([])
+      setIsSearching(false)
+      return
     }
 
     try {
-      // Process rejection in the background
-      const updateResponse = await fetch('/api/scores', {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          scoreId: scoreToProcess._id,
-          status: 'rejected',
-          rejectionReason: reasonToProcess,
-          reviewedAt: new Date().toISOString(),
-        }),
-      })
+      setIsSearching(true)
+      const searchQuery = `*[_type == "piece" && (
+        piece_title match "*${query}*" ||
+        composer match "*${query}*"
+      ) && status != "reviewed"] {
+        _id,
+        _type,
+        piece_title,
+        composer,
+        year_of_composition,
+        era,
+        "status": coalesce(status, "unreviewed"),
+        slug,
+        "editions": *[_type == "edition" && references(^._id)] {
+          _id,
+          _type,
+          slug,
+          publisher,
+          copyright,
+          editor,
+          url,
+          "status": coalesce(status, "unreviewed"),
+          rejectionReason,
+          reviewedAt
+        }
+      } | order(_createdAt desc)[0...10]`
 
-      if (!updateResponse.ok) {
-        throw new Error('Failed to update score status')
-      }
+      const results = await client.fetch<PieceWithEditions[]>(searchQuery)
+      setSearchResults(results)
     } catch (err) {
-      console.error('Failed to process rejection:', err)
-      // Optionally show a toast or notification about the background error
+      console.error('Error searching pieces:', err)
+      setError('Failed to search pieces')
+    } finally {
+      setIsSearching(false)
     }
   }
 
-  if (loading) {
+  useEffect(() => {
+    fetchPieces(currentPage)
+  }, [currentPage, filterStatus])
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      searchPieces(searchQuery)
+    }, 300)
+
+    return () => clearTimeout(timeoutId)
+  }, [searchQuery])
+
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value)
+  }
+
+  const handleEditionStatusChange = async (edition: Edition, newStatus: Edition['status']) => {
+    if (changingStatus === edition._id) return // Prevent multiple simultaneous changes
+    
+    try {
+      setChangingStatus(edition._id)
+
+      const response = await fetch('/api/editions', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          editionId: edition._id,
+          status: newStatus,
+          reviewedAt: new Date().toISOString(),
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to update edition status')
+      }
+
+      // Update the edition in the local state
+      const updatePieces = (pieces: PieceWithEditions[]) => 
+        pieces.map(piece => ({
+          ...piece,
+          editions: piece.editions.map(e => 
+            e._id === edition._id 
+              ? { ...e, status: newStatus, reviewedAt: new Date().toISOString() }
+              : e
+          )
+        }))
+
+      setPieces(prevPieces => updatePieces(prevPieces))
+      setSearchResults(prevResults => updatePieces(prevResults))
+    } catch (err) {
+      console.error('Error updating status:', err)
+      setError('Failed to update edition status')
+    } finally {
+      setChangingStatus(null)
+    }
+  }
+
+  const totalPages = Math.ceil(totalPieces / PIECES_PER_PAGE)
+  const displayPieces = searchQuery ? searchResults : pieces
+
+  if (loading && !isSearching) {
     return <div className="flex items-center justify-center min-h-screen">Loading...</div>
   }
 
@@ -387,211 +202,178 @@ export default function ReviewPage() {
   }
 
   return (
-    <div className="container mx-auto p-4 max-w-3xl">
-      <div className="flex justify-between items-center mb-4">
-        <div className="flex-1 max-w-md relative" ref={searchRef}>
-          <div className="relative">
-            <input
-              type="text"
-              placeholder="Search by piece name or composer..."
-              className="w-full px-4 py-2 border rounded"
-              value={searchQuery}
-              onChange={handleSearchChange}
-              onFocus={() => searchQuery && setShowDropdown(true)}
-            />
-            {searchLoading && (
-              <div className="absolute right-3 top-2">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-900"></div>
-              </div>
-            )}
-          </div>
-          
-          {/* Search Results Dropdown */}
-          {showDropdown && searchResults.length > 0 && (
-            <div className="absolute z-10 w-full mt-1 bg-black border border-gray-700 rounded-md shadow-lg max-h-96 overflow-y-auto">
-              {searchResults.map((score) => (
-                <button
-                  key={score._id}
-                  className="w-full px-4 py-2 text-left hover:bg-gray-900 focus:outline-none focus:bg-gray-900"
-                  onClick={() => handleScoreSelect(score)}
-                >
-                  <div className="font-medium text-white">{score.pieceName}</div>
-                  <div className="text-sm text-gray-400">{score.composerName}</div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center space-x-4">
-          <Link
-            href="/reviewed"
-            className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 flex items-center space-x-2"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-              <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-            </svg>
-            <span>View Reviewed Scores</span>
-          </Link>
-          <button
-            onClick={async () => {
-              await fetch('/api/auth/logout', { method: 'POST' });
-              window.location.href = '/auth';
-            }}
-            className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 flex items-center space-x-2"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clipRule="evenodd" />
-            </svg>
-            <span>Logout</span>
-          </button>
-        </div>
+    <div className="container mx-auto p-4">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Review Pieces</h1>
+        <Link 
+          href="/reviewed" 
+          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+        >
+          View Reviewed Pieces
+        </Link>
       </div>
 
-      {/* Main Content */}
-      <div className="relative">
-        {loading && (
-          <div className="absolute top-0 right-0 mt-2 mr-2">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-900"></div>
-          </div>
-        )}
+      <div className="flex gap-4 mb-6">
+        <div className="flex-1">
+          <input
+            type="text"
+            placeholder="Search pieces..."
+            className="w-full px-4 py-2 border rounded"
+            value={searchQuery}
+            onChange={handleSearchChange}
+          />
+        </div>
+        <select
+          value={filterStatus}
+          onChange={(e) => setFilterStatus(e.target.value as FilterStatus)}
+          className="px-4 py-2 border rounded bg-white"
+        >
+          <option value="all">All Pieces</option>
+          <option value="unreviewed">Unreviewed</option>
+          <option value="reviewed">Reviewed</option>
+        </select>
+      </div>
 
-        {/* Pagination Controls */}
-        {totalPages > 1 && !searchQuery && (
-          <div className="flex justify-center items-center space-x-2 mb-4">
-            <button
-              onClick={() => handlePageChange(currentPage - 1)}
-              disabled={currentPage === 0}
-              className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
-            >
-              Previous
-            </button>
-            <span className="text-sm text-gray-600">
-              Page {currentPage + 1} of {totalPages}
-            </span>
-            <button
-              onClick={() => handlePageChange(currentPage + 1)}
-              disabled={currentPage >= totalPages - 1}
-              className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
-            >
-              Next
-            </button>
-          </div>
-        )}
+      {!searchQuery && totalPages > 1 && (
+        <div className="flex justify-center items-center space-x-2 mb-6">
+          <button
+            onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+            disabled={currentPage === 0}
+            className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
+          >
+            Previous
+          </button>
+          <span className="text-sm text-gray-600">
+            Page {currentPage + 1} of {totalPages}
+          </span>
+          <button
+            onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={currentPage >= totalPages - 1}
+            className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
+          >
+            Next
+          </button>
+        </div>
+      )}
 
-        {/* Score Display or Empty State */}
-        {!currentScore ? (
-          <div className="border rounded p-4">
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mb-4" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-              <h2 className="text-2xl font-bold mb-2">No Scores Found</h2>
-              <p className="text-gray-600 mb-6">
-                {searchQuery 
-                  ? `No scores match your search "${searchQuery}"`
-                  : "There are no more scores waiting for review."}
-              </p>
-              <div className="flex space-x-4">
-                <Link
-                  href="/reviewed"
-                  className="px-6 py-3 bg-blue-500 text-white rounded hover:bg-blue-600 flex items-center space-x-2"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                    <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-                  </svg>
-                  <span>View Reviewed Scores</span>
-                </Link>
-                <button
-                  onClick={() => {
-                    setSearchQuery('')
-                    setCurrentPage(0)
-                    fetchScores(0)
-                  }}
-                  className="px-6 py-3 bg-black-500 text-white rounded hover:bg-gray-600 flex items-center space-x-2"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
-                  </svg>
-                  <span>Reset Search</span>
-                </button>
+      <div className="space-y-6">
+        {displayPieces.map((piece) => (
+          <div key={piece._id} className="bg-black rounded-lg shadow p-6">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h2 className="text-xl font-bold">{piece.piece_title}</h2>
+                <p className="text-gray-400">by {piece.composer}</p>
+                <p className="text-gray-400">
+                  {piece.year_of_composition} • {piece.era}
+                </p>
               </div>
-            </div>
-          </div>
-        ) : (
-          <div className="border rounded p-4">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-2xl font-bold">Score Details</h2>
               <div className="flex items-center space-x-2">
-                <button
-                  onClick={handlePreviousScore}
-                  disabled={currentScoreIndex === 0}
-                  className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
-                >
-                  ← Previous Score
-                </button>
-                <span className="text-sm text-gray-600">
-                  {currentScoreIndex + 1} of {scores.length}
+                <span className={`px-2 py-1 rounded-full text-sm ${
+                  piece.status === 'reviewed' ? 'bg-green-600 text-white' : 'bg-yellow-600 text-white'
+                }`}>
+                  {(piece.status || 'unreviewed').charAt(0).toUpperCase() + (piece.status || 'unreviewed').slice(1)}
                 </span>
-                <button
-                  onClick={handleNextScore}
-                  disabled={currentScoreIndex === scores.length - 1}
-                  className="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 disabled:opacity-50"
-                >
-                  Next Score →
-                </button>
-                <button
-                  onClick={() => openScoreInWindow(currentScore.scoreUrl)}
-                  className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 flex items-center space-x-1"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" />
-                    <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" />
-                  </svg>
-                  <span>Reopen Score</span>
-                </button>
+                {piece.status !== 'reviewed' && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const response = await fetch('/api/pieces', {
+                          method: 'PATCH',
+                          headers: {
+                            'Content-Type': 'application/json',
+                          },
+                          body: JSON.stringify({
+                            pieceId: piece._id,
+                            status: 'reviewed',
+                          }),
+                        })
+
+                        if (!response.ok) {
+                          throw new Error('Failed to update piece status')
+                        }
+
+                        // Remove the piece from the list
+                        setPieces(prevPieces => prevPieces.filter(p => p._id !== piece._id))
+                        setSearchResults(prevResults => prevResults.filter(p => p._id !== piece._id))
+                      } catch (err) {
+                        console.error('Error updating piece status:', err)
+                        setError('Failed to update piece status')
+                      }
+                    }}
+                    className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
+                  >
+                    Review Piece
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="space-y-4">
+            <div className="mt-4">
+              <h3 className="text-lg font-semibold mb-2">Editions</h3>
               <div className="space-y-2">
-                <p><strong>Piece Name:</strong> {currentScore?.pieceName}</p>
-                <p><strong>Composer:</strong> {currentScore?.composerName}</p>
-                <p><strong>Editor:</strong> {currentScore?.editor}</p>
-                <p><strong>Publisher:</strong> {currentScore?.publisher}</p>
-                <p><strong>Language:</strong> {currentScore?.language}</p>
-                <p><strong>Copyright:</strong> {currentScore?.copyright}</p>
-              </div>
-
-              <div className="mt-4">
-                <textarea
-                  className="w-full p-2 border rounded"
-                  placeholder="Rejection reason (optional)"
-                  value={rejectionReason}
-                  onChange={(e) => setRejectionReason(e.target.value)}
-                />
-              </div>
-
-              <div className="flex space-x-4 justify-center mt-4">
-                <button
-                  onClick={handleApprove}
-                  className="px-6 py-3 bg-green-500 text-white rounded hover:bg-green-600"
-                  disabled={loading}
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={handleReject}
-                  className="px-6 py-3 bg-red-500 text-white rounded hover:bg-red-600"
-                  disabled={loading}
-                >
-                  Reject
-                </button>
+                {piece.editions.map((edition) => (
+                  <div key={edition._id} className="flex items-center justify-between p-3 bg-gray-900 rounded">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-medium">{edition.publisher}</span>
+                        {edition.editor && (
+                          <span className="text-gray-400">• Editor: {edition.editor}</span>
+                        )}
+                      </div>
+                      {edition.copyright && (
+                        <p className="text-sm text-gray-400 mt-1">© {edition.copyright}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center space-x-4">
+                      {edition.url && (
+                        <button
+                          onClick={() => window.open(edition.url, 'scoreWindow', 'width=800,height=600')}
+                          className="text-blue-400 hover:text-blue-300"
+                        >
+                          View Edition
+                        </button>
+                      )}
+                      <div className="flex items-center space-x-2">
+                        {edition.status === 'unreviewed' && (
+                          <>
+                            <button
+                              onClick={() => handleEditionStatusChange(edition, 'approved')}
+                              disabled={changingStatus === edition._id}
+                              className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => handleEditionStatusChange(edition, 'rejected')}
+                              disabled={changingStatus === edition._id}
+                              className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                            >
+                              Reject
+                            </button>
+                          </>
+                        )}
+                        {edition.status === 'approved' && (
+                          <span className="text-green-400">Approved</span>
+                        )}
+                        {edition.status === 'rejected' && (
+                          <div className="flex flex-col">
+                            <span className="text-red-400">Rejected</span>
+                            {edition.rejectionReason && (
+                              <span className="text-sm text-red-400">Reason: {edition.rejectionReason}</span>
+                            )}
+                          </div>
+                        )}
+                        {changingStatus === edition._id && (
+                          <span className="text-gray-400 text-sm">Updating...</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-        )}
+        ))}
       </div>
     </div>
   )

@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
     })
     
     // If it's an IMSLP URL but not a direct PDF, try to find the PDF link
-    if (url.includes('imslp.org') && !url.toLowerCase().endsWith('.pdf')) {
+    if (url.includes('imslp.org')) {
       console.log('Proxy: Handling IMSLP URL')
       const response = await fetch(url, {
         headers: {
@@ -41,6 +41,47 @@ export async function GET(request: NextRequest) {
       
       const text = await response.text()
       console.log('Proxy: Received IMSLP page content length:', text.length)
+      
+      // For Special:ImagefromIndex URLs, look for the image URL
+      if (url.includes('Special:ImagefromIndex')) {
+        const imageMatch = text.match(/<img[^>]+src="([^"]+)"/)
+        if (imageMatch && imageMatch[1]) {
+          const imageUrl = imageMatch[1]
+          console.log('Proxy: Found image URL:', imageUrl)
+          
+          // Fetch the image
+          const imageResponse = await fetch(imageUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+          })
+          
+          if (!imageResponse.ok) {
+            console.error('Proxy: Image fetch failed:', {
+              status: imageResponse.status,
+              statusText: imageResponse.statusText,
+              url: imageUrl
+            })
+            return NextResponse.json({ 
+              error: 'Failed to fetch image from IMSLP',
+              details: {
+                status: imageResponse.status,
+                statusText: imageResponse.statusText,
+                url: imageUrl
+              }
+            }, { status: imageResponse.status })
+          }
+          
+          const contentType = imageResponse.headers.get('content-type')
+          const arrayBuffer = await imageResponse.arrayBuffer()
+          return new NextResponse(arrayBuffer, {
+            headers: {
+              'Content-Type': contentType || 'image/jpeg',
+              'Content-Disposition': 'inline',
+            },
+          })
+        }
+      }
       
       // Try different patterns for finding PDF links
       const patterns = [
@@ -160,6 +201,17 @@ export async function GET(request: NextRequest) {
       return new NextResponse(arrayBuffer, {
         headers: {
           'Content-Type': 'application/pdf',
+          'Content-Disposition': 'inline',
+        },
+      })
+    }
+
+    // If it's an image, return it directly
+    if (contentType?.startsWith('image/')) {
+      const arrayBuffer = await response.arrayBuffer()
+      return new NextResponse(arrayBuffer, {
+        headers: {
+          'Content-Type': contentType,
           'Content-Disposition': 'inline',
         },
       })
