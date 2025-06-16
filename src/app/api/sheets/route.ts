@@ -324,36 +324,256 @@ async function addPieceIfNotExists(score: any): Promise<string> {
   }
 }
 
-async function addEditionToSheet(score: any, pieceSlug: string) {
+async function removeDuplicatePiece(slug: string) {
   try {
-    console.log('Adding edition for piece:', {
-      pieceSlug,
-      editor: score.editor,
-      publisher: score.publisher,
-      scoreUrl: score.scoreUrl
+    console.log('Checking for duplicate piece:', slug)
+    
+    // Get all values in the sheet
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${PIECES_SHEET}'!A:F`,
     })
 
-    const editionRow = [
-      pieceSlug,           // Piece Slug
-      score.editor,        // Editor
-      score.publisher,     // Publisher
-      score.copyright,     // Copyright
-      score.scoreUrl,      // Score URL
-      new Date().toISOString(), // Approval Date
+    if (!response.data.values) {
+      console.log('No values found in sheet')
+      return
+    }
+
+    // Find the row index of the duplicate (skip header row)
+    const duplicateRowIndex = response.data.values.findIndex((row, index) => 
+      index > 0 && row[0] === slug
+    )
+
+    if (duplicateRowIndex === -1) {
+      console.log('No duplicate found')
+      return
+    }
+
+    console.log('Found duplicate at row:', duplicateRowIndex + 1)
+
+    // Delete the duplicate row
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          deleteDimension: {
+            range: {
+              sheetId: await getSheetId(PIECES_SHEET),
+              dimension: 'ROWS',
+              startIndex: duplicateRowIndex,
+              endIndex: duplicateRowIndex + 1
+            }
+          }
+        }]
+      }
+    })
+
+    console.log('Successfully removed duplicate')
+  } catch (error) {
+    console.error('Error removing duplicate piece:', error)
+    throw error
+  }
+}
+
+async function addPieceToSheet(piece: any) {
+  try {
+    if (!piece || !piece.slug || !piece.slug.current) {
+      throw new Error('Invalid piece data: missing required fields')
+    }
+
+    console.log('Adding piece:', {
+      id: piece._id,
+      title: piece.piece_title,
+      composer: piece.composer,
+      year: piece.year_of_composition,
+      era: piece.era,
+      slug: piece.slug.current
+    })
+
+    // Remove any existing duplicate before adding
+    await removeDuplicatePiece(piece.slug.current)
+
+    // Generate summary if not exists
+    let summary = piece.summary
+    if (!summary) {
+      try {
+        console.log('Generating summary for piece:', piece.piece_title)
+        const baseUrl = process.env.VERCEL_URL 
+          ? `https://${process.env.VERCEL_URL}` 
+          : process.env.NODE_ENV === 'development'
+            ? 'http://localhost:3000'
+            : ''
+        
+        const summaryResponse = await fetch(`${baseUrl}/api/generate-summary`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            pieceName: piece.piece_title,
+            composerName: piece.composer,
+          }),
+        })
+
+        if (summaryResponse.ok) {
+          const data = await summaryResponse.json()
+          summary = data.summary
+          console.log('Generated summary:', summary)
+          
+          // Update Sanity with the summary
+          await fetch('/api/pieces', {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              pieceId: piece._id,
+              summary: summary,
+            }),
+          })
+        } else {
+          console.error('Failed to generate summary:', await summaryResponse.text())
+        }
+      } catch (error) {
+        console.error('Error generating summary:', error)
+      }
+    }
+
+    const pieceRow = [
+      piece.slug.current,     // Slug
+      piece.piece_title || '',      // Piece Title
+      piece.composer || '',         // Composer
+      piece.year_of_composition || '', // Year
+      piece.era || '',              // Era
+      summary || '',          // Summary
     ]
 
-    await sheets.spreadsheets.values.append({
+    console.log('Appending piece row to sheet:', pieceRow)
+
+    const response = await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${APPROVED_EDITIONS_SHEET}'!A:F`,
+      range: `'${PIECES_SHEET}'!A:F`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [pieceRow],
+      },
+    })
+
+    if (!response.data) {
+      throw new Error('No response data from sheets API')
+    }
+
+    console.log('Successfully added piece:', response.data)
+    return response.data
+  } catch (error) {
+    console.error('Error adding piece:', error)
+    if (error instanceof Error) {
+      throw new Error(`Failed to add piece: ${error.message}`)
+    }
+    throw error
+  }
+}
+
+async function removeDuplicateEdition(editionSlug: string) {
+  try {
+    console.log('Checking for duplicate edition:', editionSlug)
+    
+    // Get all values in the sheet
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${APPROVED_EDITIONS_SHEET}'!A:G`,
+    })
+
+    if (!response.data.values) {
+      console.log('No values found in sheet')
+      return
+    }
+
+    // Find the row index of the duplicate (skip header row)
+    const duplicateRowIndex = response.data.values.findIndex((row, index) => 
+      index > 0 && row[1] === editionSlug // Edition slug is in column B
+    )
+
+    if (duplicateRowIndex === -1) {
+      console.log('No duplicate found')
+      return
+    }
+
+    console.log('Found duplicate at row:', duplicateRowIndex + 1)
+
+    // Delete the duplicate row
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          deleteDimension: {
+            range: {
+              sheetId: await getSheetId(APPROVED_EDITIONS_SHEET),
+              dimension: 'ROWS',
+              startIndex: duplicateRowIndex,
+              endIndex: duplicateRowIndex + 1
+            }
+          }
+        }]
+      }
+    })
+
+    console.log('Successfully removed duplicate')
+  } catch (error) {
+    console.error('Error removing duplicate edition:', error)
+    throw error
+  }
+}
+
+async function addEditionToSheet(edition: any) {
+  try {
+    if (!edition || !edition.slug || !edition.slug.current || !edition.piece || !edition.piece.slug) {
+      throw new Error('Invalid edition data: missing required fields')
+    }
+
+    console.log('Adding edition:', {
+      pieceSlug: edition.piece.slug.current,
+      editor: edition.editor,
+      publisher: edition.publisher,
+      copyright: edition.copyright,
+      url: edition.url
+    })
+
+    // Remove any existing duplicate before adding
+    await removeDuplicateEdition(edition.slug.current)
+
+    const editionRow = [
+      edition.piece.slug.current,  // Piece Slug
+      edition.slug.current,        // Edition Slug
+      edition.editor || '',        // Editor
+      edition.publisher || '',     // Publisher
+      edition.copyright || '',     // Copyright
+      edition.url || '',           // URL
+      new Date().toISOString(),    // Approval Date
+    ]
+
+    console.log('Appending edition row to sheet:', editionRow)
+
+    const response = await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${APPROVED_EDITIONS_SHEET}'!A:G`,
       valueInputOption: 'RAW',
       requestBody: {
         values: [editionRow],
       },
     })
 
-    console.log('Successfully added edition')
+    if (!response.data) {
+      throw new Error('No response data from sheets API')
+    }
+
+    console.log('Successfully added edition:', response.data)
+    return response.data
   } catch (error) {
     console.error('Error adding edition:', error)
+    if (error instanceof Error) {
+      throw new Error(`Failed to add edition: ${error.message}`)
+    }
     throw error
   }
 }
@@ -483,36 +703,61 @@ async function cleanupDuplicatePieces() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { action, score } = body
+    const { action, data } = body
+
+    if (!action || !data) {
+      return NextResponse.json({ error: 'Missing required fields: action and data' }, { status: 400 })
+    }
 
     console.log('Received request:', { 
       action, 
-      score: { 
-        pieceName: score.pieceName,
-        composerName: score.composerName,
-        status: score.status,
+      data: { 
+        type: data._type,
+        id: data._id
       }
     })
 
     // Ensure both sheets exist with correct headers
-    await ensureSheetExists(PIECES_SHEET, ['Slug', 'Piece Name', 'Composer', 'Language', 'Summary'])
-    await ensureSheetExists(APPROVED_EDITIONS_SHEET, ['Piece Slug', 'Editor', 'Publisher', 'Copyright', 'Score URL', 'Approval Date'])
+    await ensureSheetExists(PIECES_SHEET, ['Slug', 'Piece Title', 'Composer', 'Year', 'Era', 'Summary'])
+    await ensureSheetExists(APPROVED_EDITIONS_SHEET, ['Piece Slug', 'Edition Slug', 'Editor', 'Publisher', 'Copyright', 'URL', 'Approval Date'])
 
     // Process actions through the queue
-    if (action === 'add') {
-      // Return immediately but queue the actual processing
-      const processPromise = approvalQueue.add(async () => {
-        await cleanupDuplicatePieces()
-        const pieceSlug = await addPieceIfNotExists(score)
-        await addEditionToSheet(score, pieceSlug)
-      })
-
-      // Wait for queue processing to complete before sending response
-      await processPromise
-    } else if (action === 'remove') {
-      await approvalQueue.add(async () => {
-        await removeEditionFromSheet(score)
-      })
+    if (action === 'add_piece') {
+      try {
+        await approvalQueue.add(async () => {
+          await addPieceToSheet(data)
+        })
+      } catch (error) {
+        console.error('Error in add_piece action:', error)
+        return NextResponse.json({ 
+          error: 'Failed to add piece to sheet',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }, { status: 500 })
+      }
+    } else if (action === 'add_edition') {
+      try {
+        await approvalQueue.add(async () => {
+          await addEditionToSheet(data)
+        })
+      } catch (error) {
+        console.error('Error in add_edition action:', error)
+        return NextResponse.json({ 
+          error: 'Failed to add edition to sheet',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }, { status: 500 })
+      }
+    } else if (action === 'remove_edition') {
+      try {
+        await approvalQueue.add(async () => {
+          await removeDuplicateEdition(data.slug.current)
+        })
+      } catch (error) {
+        console.error('Error in remove_edition action:', error)
+        return NextResponse.json({ 
+          error: 'Failed to remove edition from sheet',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }, { status: 500 })
+      }
     } else {
       console.error('Invalid action:', action)
       return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
