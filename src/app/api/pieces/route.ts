@@ -64,7 +64,9 @@ export async function PATCH(request: NextRequest) {
       if (!updatedSummary) {
         try {
           console.log('Generating summary for piece:', piece.piece_title)
-          const baseUrl = getBaseUrl()
+          const baseUrl = process.env.VERCEL === '1'
+            ? 'https://scorereviewer.vercel.app'
+            : 'http://localhost:3000'
           
           const summaryResponse = await fetch(`${baseUrl}/api/generate-summary`, {
             method: 'POST',
